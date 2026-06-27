@@ -295,6 +295,26 @@ function displayPhone(raw: string): string {
   return digits ? formatPhoneRu(raw) : raw;
 }
 
+function supportEventChipLabel(ev: SupportCalendarEvent): string {
+  if (ev.type === 'payment') {
+    const amt = ev.amount ? `${ev.amount.toLocaleString('ru-RU')} ₽` : 'Оплата';
+    return ev.isPaid ? amt : amt;
+  }
+  if (ev.type === 'act') return ev.title || 'Акт ТП';
+  const t = ev.text || ev.title || 'Заметка';
+  return t.length > 18 ? `${t.slice(0, 18)}…` : t;
+}
+
+function supportEventChipClass(ev: SupportCalendarEvent): string {
+  if (ev.type === 'payment') {
+    return ev.isPaid
+      ? 'bg-emerald-500/15 text-emerald-800 border-emerald-200'
+      : 'bg-amber-400/20 text-amber-900 border-amber-200';
+  }
+  if (ev.type === 'act') return 'bg-blue-500/15 text-blue-800 border-blue-200';
+  return 'bg-gray-500/10 text-gray-700 border-gray-200';
+}
+
 const TRAFFIC_SOURCES = [
   { key: 'yandex',  label: 'Яндекс Директ',    color: '#FF4233', bg: '#FFF1F0', Icon: Target },
   { key: 'vk',      label: 'ВК Реклама',        color: '#4C75A3', bg: '#EEF3FA', Icon: MessageSquare },
@@ -420,6 +440,7 @@ function App() {
   const [supEventAmount, setSupEventAmount] = useState('');
   const [supEventText, setSupEventText] = useState('');
   const [supEventTitle, setSupEventTitle] = useState('');
+  const [isAddingSupport, setIsAddingSupport] = useState(false);
   const [wpTitle, setWpTitle] = useState('');
   const [wpPrice, setWpPrice] = useState('');
   const [wpCustomer, setWpCustomer] = useState('');
@@ -859,6 +880,7 @@ function App() {
     setSupCounterpartyDetails('');
     setSupDurationMonths('12');
     setSupStartDate(format(new Date(), 'yyyy-MM-dd'));
+    setIsAddingSupport(false);
   };
 
   const patchSupportRecord = (id: string, patch: Partial<SupportRecord>) => {
@@ -1620,70 +1642,102 @@ function App() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-7 gap-1 mb-1">
+              <div className="grid grid-cols-7 gap-2 mb-2">
                 {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(wd => (
-                  <div key={wd} className="text-center text-[10px] font-black text-gray-400 uppercase py-2">
+                  <div key={wd} className="text-center text-[11px] font-bold text-gray-400 py-1">
                     {wd}
                   </div>
                 ))}
               </div>
 
-              <div className="grid grid-cols-7 gap-1 mb-8">
+              <div className="grid grid-cols-7 gap-2 mb-6">
                 {calDays.map(day => {
                   const dateStr = format(day, 'yyyy-MM-dd');
                   const inMonth = isSameMonth(day, supCalViewMonth);
                   const dayEvents = eventsByDate[dateStr] || [];
                   const isActive = supCalActiveDate === dateStr;
                   const inContract = isInContractPeriod(day);
+                  const visibleEvents = dayEvents.slice(0, 2);
+                  const hiddenCount = dayEvents.length - visibleEvents.length;
                   return (
                     <button
                       key={dateStr}
                       type="button"
                       onClick={() => setSupCalActiveDate(dateStr)}
-                      className={`min-h-[72px] p-1.5 rounded-xl border text-left transition-all flex flex-col ${
-                        !inMonth ? 'opacity-35' : ''
+                      className={`min-h-[108px] p-2 rounded-2xl border text-left transition-all flex flex-col gap-1.5 overflow-hidden ${
+                        !inMonth ? 'opacity-30' : ''
                       } ${
                         isActive
-                          ? 'border-teal-500 bg-teal-50 ring-2 ring-teal-500/20 shadow-md'
+                          ? 'border-teal-400 bg-white ring-2 ring-teal-400/30 shadow-lg shadow-teal-100'
                           : inContract
-                            ? 'border-teal-100 bg-teal-50/40 hover:border-teal-300 hover:bg-teal-50'
-                            : 'border-gray-100 bg-gray-50/50 hover:border-teal-200 hover:bg-white'
-                      } ${isToday(day) && !isActive ? 'ring-1 ring-teal-300' : ''}`}
+                            ? 'border-teal-100/80 bg-teal-50/30 hover:border-teal-300 hover:bg-white hover:shadow-md'
+                            : 'border-gray-100 bg-white hover:border-teal-200 hover:shadow-sm'
+                      }`}
                     >
-                      <span
-                        className={`text-xs font-bold mb-1 w-6 h-6 flex items-center justify-center rounded-lg ${
-                          isToday(day) ? 'bg-teal-600 text-white' : 'text-gray-700'
-                        }`}
-                      >
-                        {format(day, 'd')}
-                      </span>
-                      <div className="flex flex-wrap gap-0.5 mt-auto">
-                        {dayEvents.slice(0, 4).map(ev => (
+                      <div className="flex items-center justify-between shrink-0">
+                        <span
+                          className={`text-sm font-bold w-8 h-8 flex items-center justify-center rounded-full ${
+                            isToday(day)
+                              ? 'bg-teal-600 text-white shadow-md shadow-teal-500/30'
+                              : 'text-gray-700'
+                          }`}
+                        >
+                          {format(day, 'd')}
+                        </span>
+                        {dayEvents.length > 0 && (
+                          <span className="text-[9px] font-black text-gray-400 tabular-nums">
+                            {dayEvents.length}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1 flex-1 min-h-0 w-full">
+                        {visibleEvents.map(ev => (
                           <span
                             key={ev.id}
-                            className={`w-1.5 h-1.5 rounded-full ${
-                              ev.type === 'payment'
-                                ? ev.isPaid
-                                  ? 'bg-emerald-500'
-                                  : 'bg-amber-400'
-                                : ev.type === 'act'
-                                  ? 'bg-blue-500'
-                                  : 'bg-gray-400'
-                            }`}
-                          />
+                            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-xl border text-[10px] font-bold leading-tight w-full min-w-0 ${supportEventChipClass(ev)}`}
+                          >
+                            <span className="shrink-0 w-5 h-5 rounded-lg bg-white/70 flex items-center justify-center shadow-sm">
+                              {ev.type === 'payment' ? (
+                                <Wallet className="w-3 h-3" />
+                              ) : ev.type === 'act' ? (
+                                <FileCheck className="w-3 h-3" />
+                              ) : (
+                                <MessageSquare className="w-3 h-3" />
+                              )}
+                            </span>
+                            <span className="truncate">{supportEventChipLabel(ev)}</span>
+                            {ev.type === 'payment' && ev.isPaid && (
+                              <CheckCircle className="w-3 h-3 shrink-0 text-emerald-600 ml-auto" />
+                            )}
+                          </span>
                         ))}
+                        {hiddenCount > 0 && (
+                          <span className="text-[10px] font-bold text-gray-400 px-2">
+                            +{hiddenCount} ещё
+                          </span>
+                        )}
                       </div>
                     </button>
                   );
                 })}
               </div>
 
-              <div className="flex flex-wrap gap-4 mb-6 text-[10px] font-bold uppercase tracking-wider text-gray-500">
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-200 border border-teal-300" /> Срок договора</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" /> Оплачено</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" /> Ожидает оплаты</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-blue-500" /> Акт</span>
-                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-gray-400" /> Комментарий</span>
+              <div className="flex flex-wrap gap-2 mb-6">
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-teal-50 border border-teal-100 text-[11px] font-bold text-teal-700">
+                  <span className="w-2 h-2 rounded-full bg-teal-300" /> Срок договора
+                </span>
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-200 text-[11px] font-bold text-emerald-800">
+                  <Wallet className="w-3.5 h-3.5" /> Оплачено
+                </span>
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-400/20 border border-amber-200 text-[11px] font-bold text-amber-900">
+                  <Wallet className="w-3.5 h-3.5" /> Ожидает оплаты
+                </span>
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-500/15 border border-blue-200 text-[11px] font-bold text-blue-800">
+                  <FileCheck className="w-3.5 h-3.5" /> Акт ТП
+                </span>
+                <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-500/10 border border-gray-200 text-[11px] font-bold text-gray-700">
+                  <MessageSquare className="w-3.5 h-3.5" /> Комментарий
+                </span>
               </div>
 
               {supCalActiveDate ? (
@@ -1701,30 +1755,36 @@ function App() {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
                     <button
                       type="button"
                       onClick={() => openSupportEventModal('act', supCalActiveDate)}
-                      className="flex items-center gap-3 p-4 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-left transition-all"
+                      className="flex flex-col items-center gap-3 p-5 rounded-2xl border border-blue-100 bg-blue-50/80 hover:bg-blue-100 hover:shadow-md transition-all text-center"
                     >
-                      <FileCheck className="w-5 h-5 text-blue-600 shrink-0" />
-                      <span className="text-sm font-bold text-blue-800">Акт по техподдержке</span>
+                      <span className="w-14 h-14 rounded-2xl bg-blue-500 text-white flex items-center justify-center shadow-lg shadow-blue-500/25">
+                        <FileCheck className="w-7 h-7" />
+                      </span>
+                      <span className="text-sm font-black text-blue-900 leading-snug">Акт по<br />техподдержке</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => openSupportEventModal('payment', supCalActiveDate, s.price)}
-                      className="flex items-center gap-3 p-4 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-left transition-all"
+                      className="flex flex-col items-center gap-3 p-5 rounded-2xl border border-emerald-100 bg-emerald-50/80 hover:bg-emerald-100 hover:shadow-md transition-all text-center"
                     >
-                      <Wallet className="w-5 h-5 text-emerald-600 shrink-0" />
-                      <span className="text-sm font-bold text-emerald-800">Оплата контрагента</span>
+                      <span className="w-14 h-14 rounded-2xl bg-emerald-500 text-white flex items-center justify-center shadow-lg shadow-emerald-500/25">
+                        <Wallet className="w-7 h-7" />
+                      </span>
+                      <span className="text-sm font-black text-emerald-900 leading-snug">Оплата<br />контрагента</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => openSupportEventModal('comment', supCalActiveDate)}
-                      className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 bg-gray-50 hover:bg-gray-100 text-left transition-all"
+                      className="flex flex-col items-center gap-3 p-5 rounded-2xl border border-gray-200 bg-gray-50/80 hover:bg-gray-100 hover:shadow-md transition-all text-center"
                     >
-                      <MessageSquare className="w-5 h-5 text-gray-600 shrink-0" />
-                      <span className="text-sm font-bold text-gray-800">Комментарий</span>
+                      <span className="w-14 h-14 rounded-2xl bg-gray-600 text-white flex items-center justify-center shadow-lg shadow-gray-500/25">
+                        <MessageSquare className="w-7 h-7" />
+                      </span>
+                      <span className="text-sm font-black text-gray-800 leading-snug">Комментарий</span>
                     </button>
                   </div>
 
@@ -1739,13 +1799,32 @@ function App() {
                           return (
                             <div
                               key={ev.id}
-                              className={`flex flex-wrap items-start gap-3 p-4 rounded-xl border ${meta.bg} ${meta.border}`}
+                              className={`flex flex-wrap items-start gap-3 p-4 rounded-2xl border ${meta.bg} ${meta.border}`}
                             >
+                              <span
+                                className={`shrink-0 w-11 h-11 rounded-2xl flex items-center justify-center shadow-sm ${
+                                  ev.type === 'payment'
+                                    ? ev.isPaid
+                                      ? 'bg-emerald-500 text-white'
+                                      : 'bg-amber-400 text-white'
+                                    : ev.type === 'act'
+                                      ? 'bg-blue-500 text-white'
+                                      : 'bg-gray-500 text-white'
+                                }`}
+                              >
+                                {ev.type === 'payment' ? (
+                                  <Wallet className="w-5 h-5" />
+                                ) : ev.type === 'act' ? (
+                                  <FileCheck className="w-5 h-5" />
+                                ) : (
+                                  <MessageSquare className="w-5 h-5" />
+                                )}
+                              </span>
                               {ev.type === 'payment' && (
                                 <button
                                   type="button"
                                   onClick={() => toggleSupportEventPaid(s.id, ev.id)}
-                                  className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center transition-all ${
+                                  className={`shrink-0 w-9 h-9 rounded-xl flex items-center justify-center transition-all ${
                                     ev.isPaid
                                       ? 'bg-emerald-500 text-white'
                                       : 'bg-white border border-gray-300 text-gray-400 hover:border-emerald-400'
@@ -1754,12 +1833,6 @@ function App() {
                                 >
                                   <CheckCircle className="w-4 h-4" />
                                 </button>
-                              )}
-                              {ev.type === 'act' && (
-                                <FileCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
-                              )}
-                              {ev.type === 'comment' && (
-                                <MessageSquare className="w-5 h-5 text-gray-500 shrink-0 mt-0.5" />
                               )}
                               <div className="flex-1 min-w-0">
                                 <div className={`text-[10px] font-black uppercase tracking-wider mb-1 ${meta.color}`}>
@@ -3113,131 +3186,56 @@ function App() {
           </div>
         ) : activeTab === 'support' ? (
           <div className="p-10 max-w-7xl mx-auto w-full">
-            <div className="mb-10 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+            <div className="mb-10 flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <h1 className="text-3xl font-black text-[#0F172A] tracking-tight">Сопровождение</h1>
                 <p className="text-gray-500 font-medium mt-1.5 max-w-2xl">
-                  Договоры на сопровождение: контрагент, реквизиты, график оплат и прикреплённый договор.
+                  Активные договоры на сопровождение — контрагенты, календарь и документы.
                 </p>
               </div>
-              <div className="rounded-[1.5rem] border border-teal-100 bg-gradient-to-br from-teal-50 to-white px-8 py-5 shadow-lg shadow-teal-100/60 shrink-0">
-                <div className="text-[10px] font-black uppercase tracking-[0.2em] text-teal-500/80 mb-1">Сумма всех договоров</div>
-                <div className="text-3xl font-black text-teal-700 tabular-nums">
-                  {supportRecords.reduce((sum, r) => sum + (Number(r.price) || 0), 0).toLocaleString('ru-RU')} ₽
+              <div className="flex items-center gap-4 shrink-0">
+                <div className="rounded-[1.5rem] border border-teal-100 bg-gradient-to-br from-teal-50 to-white px-8 py-5 shadow-lg shadow-teal-100/60">
+                  <div className="text-[10px] font-black uppercase tracking-[0.2em] text-teal-500/80 mb-1">Сумма всех договоров</div>
+                  <div className="text-3xl font-black text-teal-700 tabular-nums">
+                    {supportRecords.reduce((sum, r) => sum + (Number(r.price) || 0), 0).toLocaleString('ru-RU')} ₽
+                  </div>
+                  <div className="text-xs font-semibold text-gray-500 mt-1">
+                    {(() => {
+                      const n = supportRecords.length;
+                      const w =
+                        n % 10 === 1 && n % 100 !== 11
+                          ? 'договор'
+                          : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)
+                            ? 'договора'
+                            : 'договоров';
+                      return `${n} ${w}`;
+                    })()}
+                  </div>
                 </div>
-                <div className="text-xs font-semibold text-gray-500 mt-1">
-                  {(() => {
-                    const n = supportRecords.length;
-                    const w =
-                      n % 10 === 1 && n % 100 !== 11
-                        ? 'договор'
-                        : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)
-                          ? 'договора'
-                          : 'договоров';
-                    return `${n} ${w}`;
-                  })()}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddingSupport(true)}
+                  className="w-14 h-14 bg-teal-600 hover:bg-teal-700 active:scale-95 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-teal-500/30 transition-all"
+                  title="Добавить сопровождение"
+                >
+                  <Plus className="w-7 h-7" />
+                </button>
               </div>
             </div>
-
-            <section className="bg-white rounded-[2rem] border border-gray-200/60 p-8 mb-12 shadow-xl shadow-gray-200/40">
-              <form onSubmit={addSupportRecord} className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="md:col-span-2">
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Название / тип сопровождения *</label>
-                  <input
-                    type="text"
-                    value={supTitle}
-                    onChange={(e) => setSupTitle(e.target.value)}
-                    placeholder="Например: Техподдержка сайта"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Контрагент</label>
-                  <input
-                    type="text"
-                    value={supCounterpartyName}
-                    onChange={(e) => setSupCounterpartyName(e.target.value)}
-                    placeholder="ООО или ФИО"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Цена (₽) / мес.</label>
-                  <input
-                    type="text"
-                    value={supPrice}
-                    onChange={(e) => setSupPrice(formatNumber(e.target.value))}
-                    placeholder="0"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Срок (мес.)</label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={supDurationMonths}
-                    onChange={(e) => setSupDurationMonths(e.target.value)}
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Начало договора</label>
-                  <input
-                    type="date"
-                    value={supStartDate}
-                    onChange={(e) => setSupStartDate(e.target.value)}
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Реквизиты контрагента</label>
-                  <textarea
-                    value={supCounterpartyDetails}
-                    onChange={(e) => setSupCounterpartyDetails(e.target.value)}
-                    rows={3}
-                    placeholder="ИНН, счёт, банк…"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Что входит в сопровождение</label>
-                  <textarea
-                    value={supDescription}
-                    onChange={(e) => setSupDescription(e.target.value)}
-                    rows={3}
-                    placeholder="Обновления, мониторинг, правки…"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Комментарий</label>
-                  <textarea
-                    value={supComment}
-                    onChange={(e) => setSupComment(e.target.value)}
-                    rows={2}
-                    placeholder="Внутренние заметки"
-                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
-                  />
-                </div>
-                <div className="md:col-span-2 flex justify-end">
-                  <button
-                    type="submit"
-                    className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-10 py-4 rounded-2xl flex items-center gap-2 shadow-lg shadow-teal-500/25 transition-all active:scale-95"
-                  >
-                    <Plus className="w-5 h-5" /> Создать сопровождение
-                  </button>
-                </div>
-              </form>
-            </section>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
               {filteredSupportRecords.length === 0 ? (
                 <div className="col-span-full py-20 text-center bg-gray-50 rounded-[2.5rem] border-2 border-dashed border-gray-200">
                   <LifeBuoy className="w-12 h-12 text-gray-300 mx-auto mb-4" />
                   <h3 className="text-lg font-bold text-gray-400">Пока нет сопровождений</h3>
-                  <p className="text-gray-400 text-sm mt-1">Создайте первое через форму выше</p>
+                  <p className="text-gray-400 text-sm mt-1 mb-6">Нажмите «+» справа сверху, чтобы создать первое</p>
+                  <button
+                    type="button"
+                    onClick={() => setIsAddingSupport(true)}
+                    className="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white font-bold px-6 py-3 rounded-2xl transition-all"
+                  >
+                    <Plus className="w-5 h-5" /> Добавить сопровождение
+                  </button>
                 </div>
               ) : (
                 filteredSupportRecords.map((item) => {
@@ -3326,6 +3324,110 @@ function App() {
                 })
               )}
             </div>
+
+            {isAddingSupport && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+                <div className="bg-white rounded-[2rem] p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-gray-100">
+                  <div className="flex items-center justify-between mb-6">
+                    <h2 className="text-xl font-black text-[#0F172A]">Новое сопровождение</h2>
+                    <button
+                      type="button"
+                      onClick={() => setIsAddingSupport(false)}
+                      className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-all"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                  <form onSubmit={addSupportRecord} className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    <div className="md:col-span-2">
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Название / тип *</label>
+                      <input
+                        type="text"
+                        value={supTitle}
+                        onChange={(e) => setSupTitle(e.target.value)}
+                        placeholder="Например: Техподдержка сайта"
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                        autoFocus
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Контрагент</label>
+                      <input
+                        type="text"
+                        value={supCounterpartyName}
+                        onChange={(e) => setSupCounterpartyName(e.target.value)}
+                        placeholder="ООО или ФИО"
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Цена (₽) / мес.</label>
+                      <input
+                        type="text"
+                        value={supPrice}
+                        onChange={(e) => setSupPrice(formatNumber(e.target.value))}
+                        placeholder="0"
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Срок (мес.)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={supDurationMonths}
+                        onChange={(e) => setSupDurationMonths(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Начало договора</label>
+                      <input
+                        type="date"
+                        value={supStartDate}
+                        onChange={(e) => setSupStartDate(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Реквизиты контрагента</label>
+                      <textarea
+                        value={supCounterpartyDetails}
+                        onChange={(e) => setSupCounterpartyDetails(e.target.value)}
+                        rows={2}
+                        placeholder="ИНН, счёт, банк…"
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Что входит в сопровождение</label>
+                      <textarea
+                        value={supDescription}
+                        onChange={(e) => setSupDescription(e.target.value)}
+                        rows={2}
+                        placeholder="Обновления, мониторинг, правки…"
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                      />
+                    </div>
+                    <div className="md:col-span-2 flex gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsAddingSupport(false)}
+                        className="flex-1 py-3.5 rounded-2xl font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-all"
+                      >
+                        Отмена
+                      </button>
+                      <button
+                        type="submit"
+                        className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-bold py-3.5 rounded-2xl flex items-center justify-center gap-2 shadow-lg shadow-teal-500/25 transition-all"
+                      >
+                        <Plus className="w-5 h-5" /> Создать
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
           </div>
         ) : activeTab === 'employees' ? (
           <div className="p-10 max-w-7xl mx-auto w-full">
