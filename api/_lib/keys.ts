@@ -5,6 +5,7 @@ export const ALLOWED_STORE_KEYS = new Set([
   'crm_logs_v2',
   'crm_tasks_v2',
   'crm_work_projects_v1',
+  'crm_support_v1',
 ]);
 
 export function isAllowedStoreKey(key: string): boolean {

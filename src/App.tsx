@@ -11,7 +11,7 @@ import {
   Activity, Users,
   Phone, UserCircle,
   TrendingUp, Target, MessageSquare, Tag, Radio,
-  FolderKanban, GripVertical
+  FolderKanban, GripVertical, LifeBuoy, Download
 } from 'lucide-react';
 import { format, addDays, differenceInSeconds, isPast, differenceInHours } from 'date-fns';
 import { ru } from 'date-fns/locale';
@@ -97,6 +97,111 @@ interface WorkProject {
   currentStage: string;
   createdAt: string;
   updatedAt: string;
+}
+
+interface SupportContractFile {
+  name: string;
+  type: string;
+  dataUrl: string;
+  uploadedAt: string;
+}
+
+interface SupportPaymentEntry {
+  id: string;
+  dueDate: string;
+  amount: number;
+  label: string;
+  isPaid: boolean;
+  paidAt?: string;
+  note?: string;
+}
+
+interface SupportRecord {
+  id: string;
+  /** Название / тип сопровождения */
+  title: string;
+  /** Описание: что входит в сопровождение */
+  description: string;
+  comment: string;
+  price: number;
+  counterpartyName: string;
+  /** Реквизиты контрагента */
+  counterpartyDetails: string;
+  paymentSchedule: SupportPaymentEntry[];
+  contract?: SupportContractFile;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const MAX_CONTRACT_BYTES = 4 * 1024 * 1024;
+
+function normalizeSupportRecord(raw: Partial<SupportRecord>): SupportRecord {
+  return {
+    id: raw.id || crypto.randomUUID(),
+    title: raw.title || '',
+    description: raw.description || '',
+    comment: raw.comment || '',
+    price: typeof raw.price === 'number' && !Number.isNaN(raw.price) ? raw.price : 0,
+    counterpartyName: raw.counterpartyName || '',
+    counterpartyDetails: raw.counterpartyDetails || '',
+    paymentSchedule: Array.isArray(raw.paymentSchedule)
+      ? raw.paymentSchedule.map(e => ({
+          id: e.id || crypto.randomUUID(),
+          dueDate: e.dueDate || new Date().toISOString(),
+          amount: Number(e.amount) || 0,
+          label: e.label || '',
+          isPaid: !!e.isPaid,
+          paidAt: e.paidAt,
+          note: e.note || '',
+        }))
+      : [],
+    contract: raw.contract?.dataUrl ? raw.contract : undefined,
+    createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || new Date().toISOString(),
+  };
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Не удалось прочитать файл'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Цифры номера: 7 + 10 цифр (8… → 7…) */
+function phoneDigitsOnly(raw: string): string {
+  const d = raw.replace(/\D/g, '');
+  if (!d) return '';
+  if (d.startsWith('8') && d.length >= 11) return '7' + d.slice(1, 11);
+  if (d.startsWith('7')) return d.slice(0, 11);
+  return ('7' + d).slice(0, 11);
+}
+
+/** +7 (999) 919-62-61 — только отображение/ввод, исходные цифры не теряются */
+function formatPhoneRu(raw: string): string {
+  const d = phoneDigitsOnly(raw);
+  if (!d) return '';
+  const n = d.slice(1);
+  let result = '+7';
+  if (n.length === 0) return result;
+  result += ' (' + n.slice(0, Math.min(3, n.length));
+  if (n.length < 3) return result;
+  result += ')';
+  if (n.length <= 3) return result;
+  result += ' ' + n.slice(3, Math.min(6, n.length));
+  if (n.length <= 6) return result;
+  result += '-' + n.slice(6, Math.min(8, n.length));
+  if (n.length <= 8) return result;
+  result += '-' + n.slice(8, Math.min(10, n.length));
+  return result;
+}
+
+function displayPhone(raw: string): string {
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  return digits ? formatPhoneRu(raw) : raw;
 }
 
 const TRAFFIC_SOURCES = [
@@ -199,7 +304,7 @@ function App() {
   const [now, setNow] = useState(new Date());
   const [search, setSearch] = useState('');
   const [view, setView] = useState<'grid' | 'list'>('grid');
-  const [activeTab, setActiveTab] = useState<'projects' | 'work' | 'employees' | 'leads' | 'logs' | 'tasks' | 'finance' | 'traffic'>('projects');
+  const [activeTab, setActiveTab] = useState<'projects' | 'work' | 'support' | 'employees' | 'leads' | 'logs' | 'tasks' | 'finance' | 'traffic'>('projects');
   const [selectedSource, setSelectedSource] = useState('');
   const [trafficPeriod, setTrafficPeriod] = useState<'week' | 'month' | 'quarter' | 'year' | 'all'>('month');
   const [financePeriod, setFinancePeriod] = useState<'week' | 'month' | 'quarter' | 'year' | 'all'>('month');
@@ -208,6 +313,17 @@ function App() {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [workProjects, setWorkProjects] = useState<WorkProject[]>([]);
   const [selectedWorkProject, setSelectedWorkProject] = useState<WorkProject | null>(null);
+  const [supportRecords, setSupportRecords] = useState<SupportRecord[]>([]);
+  const [selectedSupport, setSelectedSupport] = useState<SupportRecord | null>(null);
+  const [supTitle, setSupTitle] = useState('');
+  const [supDescription, setSupDescription] = useState('');
+  const [supComment, setSupComment] = useState('');
+  const [supPrice, setSupPrice] = useState('');
+  const [supCounterpartyName, setSupCounterpartyName] = useState('');
+  const [supCounterpartyDetails, setSupCounterpartyDetails] = useState('');
+  const [newPayDue, setNewPayDue] = useState('');
+  const [newPayAmount, setNewPayAmount] = useState('');
+  const [newPayLabel, setNewPayLabel] = useState('');
   const [wpTitle, setWpTitle] = useState('');
   const [wpPrice, setWpPrice] = useState('');
   const [wpCustomer, setWpCustomer] = useState('');
@@ -246,6 +362,7 @@ function App() {
     logs,
     tasks,
     workProjects,
+    supportRecords,
   });
 
   // Migration and loading
@@ -278,6 +395,7 @@ function App() {
       { key: 'crm_logs_v2', setter: setLogs as (v: any) => void },
       { key: 'crm_tasks_v2', setter: taskSetter },
       { key: 'crm_work_projects_v1', setter: setWorkProjects as (v: any) => void },
+      { key: 'crm_support_v1', setter: setSupportRecords as (v: any) => void },
     ];
 
     const loadData = async () => {
@@ -294,6 +412,8 @@ function App() {
                 rate: typeof em.rate === 'number' && !Number.isNaN(em.rate) ? em.rate : 0,
               }))
             );
+          } else if (key === 'crm_support_v1') {
+            setter(data.map((r: SupportRecord) => normalizeSupportRecord(r)));
           } else {
             setter(data);
           }
@@ -325,8 +445,8 @@ function App() {
   );
 
   useEffect(() => {
-    appStateRef.current = { projects, employees, leads, logs, tasks, workProjects };
-  }, [projects, employees, leads, logs, tasks, workProjects]);
+    appStateRef.current = { projects, employees, leads, logs, tasks, workProjects, supportRecords };
+  }, [projects, employees, leads, logs, tasks, workProjects, supportRecords]);
 
   useEffect(() => {
     selectedWorkProjectRef.current = selectedWorkProject;
@@ -364,6 +484,7 @@ function App() {
       crm_logs_v2: s.logs,
       crm_tasks_v2: s.tasks,
       crm_work_projects_v1: workProjectsSnapshot,
+      crm_support_v1: s.supportRecords,
     };
     flushCloudSnapshot(snapshot);
   }, [persist]);
@@ -597,6 +718,134 @@ function App() {
     );
   };
 
+  const addSupportRecord = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supTitle.trim()) return;
+    const ts = new Date().toISOString();
+    const record: SupportRecord = {
+      id: crypto.randomUUID(),
+      title: supTitle.trim(),
+      description: supDescription.trim(),
+      comment: supComment.trim(),
+      price: parseFloat(supPrice.replace(/\s/g, '')) || 0,
+      counterpartyName: supCounterpartyName.trim(),
+      counterpartyDetails: supCounterpartyDetails.trim(),
+      paymentSchedule: [],
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    const next = [...supportRecords, record];
+    setSupportRecords(next);
+    persist('crm_support_v1', next);
+    addLog('Сопровождение', `Создано: ${record.title}`);
+    setSupTitle('');
+    setSupDescription('');
+    setSupComment('');
+    setSupPrice('');
+    setSupCounterpartyName('');
+    setSupCounterpartyDetails('');
+  };
+
+  const patchSupportRecord = (id: string, patch: Partial<SupportRecord>) => {
+    const ts = new Date().toISOString();
+    setSupportRecords(prev => {
+      const next = prev.map(r =>
+        r.id === id ? normalizeSupportRecord({ ...r, ...patch, updatedAt: ts }) : r
+      );
+      persist('crm_support_v1', next);
+      return next;
+    });
+    setSelectedSupport(prev =>
+      prev && prev.id === id
+        ? normalizeSupportRecord({ ...prev, ...patch, updatedAt: ts })
+        : prev
+    );
+  };
+
+  const deleteSupportRecord = (id: string) => {
+    const rec = supportRecords.find(r => r.id === id);
+    const next = supportRecords.filter(r => r.id !== id);
+    setSupportRecords(next);
+    persist('crm_support_v1', next);
+    if (selectedSupport?.id === id) setSelectedSupport(null);
+    addLog('Сопровождение', `Удалено: ${rec?.title ?? id}`);
+  };
+
+  const addSupportPayment = (supportId: string) => {
+    if (!newPayDue.trim()) return;
+    const entry: SupportPaymentEntry = {
+      id: crypto.randomUUID(),
+      dueDate: newPayDue,
+      amount: parseFloat(newPayAmount.replace(/\s/g, '')) || 0,
+      label: newPayLabel.trim() || 'Оплата',
+      isPaid: false,
+    };
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    const schedule = [...rec.paymentSchedule, entry];
+    patchSupportRecord(supportId, { paymentSchedule: schedule });
+    setNewPayDue('');
+    setNewPayAmount('');
+    setNewPayLabel('');
+  };
+
+  const updateSupportPayment = (
+    supportId: string,
+    paymentId: string,
+    patch: Partial<SupportPaymentEntry>
+  ) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    const schedule = rec.paymentSchedule.map(p =>
+      p.id === paymentId ? { ...p, ...patch } : p
+    );
+    patchSupportRecord(supportId, { paymentSchedule: schedule });
+  };
+
+  const toggleSupportPaymentPaid = (supportId: string, paymentId: string) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    const entry = rec.paymentSchedule.find(p => p.id === paymentId);
+    if (!entry) return;
+    const isPaid = !entry.isPaid;
+    updateSupportPayment(supportId, paymentId, {
+      isPaid,
+      paidAt: isPaid ? new Date().toISOString().slice(0, 10) : undefined,
+    });
+  };
+
+  const removeSupportPayment = (supportId: string, paymentId: string) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    patchSupportRecord(supportId, {
+      paymentSchedule: rec.paymentSchedule.filter(p => p.id !== paymentId),
+    });
+  };
+
+  const uploadSupportContract = async (supportId: string, file: File) => {
+    if (file.size > MAX_CONTRACT_BYTES) {
+      alert('Файл слишком большой (макс. 4 МБ)');
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const contract: SupportContractFile = {
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        dataUrl,
+        uploadedAt: new Date().toISOString(),
+      };
+      patchSupportRecord(supportId, { contract });
+      addLog('Сопровождение', `Загружен договор: ${file.name}`);
+    } catch {
+      alert('Не удалось загрузить файл');
+    }
+  };
+
+  const removeSupportContract = (supportId: string) => {
+    patchSupportRecord(supportId, { contract: undefined });
+  };
+
   const addEmployee = (e: React.FormEvent) => {
     e.preventDefault();
     if (!empName.trim()) return;
@@ -661,7 +910,7 @@ function App() {
     const lead: Lead = {
       id: crypto.randomUUID(),
       name: newLead.name,
-      phone: newLead.phone || '',
+      phone: newLead.phone ? formatPhoneRu(newLead.phone) : '',
       budget: newLead.budget || 0,
       notes: newLead.notes || '',
       productType: newLead.productType,
@@ -961,6 +1210,347 @@ function App() {
     w.title.toLowerCase().includes(search.toLowerCase()) ||
     w.customer.toLowerCase().includes(search.toLowerCase())
   );
+
+  const filteredSupportRecords = supportRecords.filter(r =>
+    r.title.toLowerCase().includes(search.toLowerCase()) ||
+    r.counterpartyName.toLowerCase().includes(search.toLowerCase()) ||
+    r.description.toLowerCase().includes(search.toLowerCase())
+  );
+
+  if (selectedSupport) {
+    const s = selectedSupport;
+    const paidTotal = s.paymentSchedule.filter(p => p.isPaid).reduce((sum, p) => sum + p.amount, 0);
+    const scheduleTotal = s.paymentSchedule.reduce((sum, p) => sum + p.amount, 0);
+    const sortedSchedule = [...s.paymentSchedule].sort(
+      (a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
+    );
+
+    return (
+      <div className="flex h-screen bg-[#F8FAFC] text-[#1E293B] font-['Inter',sans-serif]">
+        <main className="flex-1 overflow-y-auto p-10 max-w-4xl mx-auto w-full">
+          <button
+            type="button"
+            onClick={() => {
+              flushAllToDisk();
+              setSelectedSupport(null);
+            }}
+            className="flex items-center gap-2 text-gray-500 hover:text-teal-600 font-bold mb-8 transition-colors group"
+          >
+            <ArrowLeft className="w-5 h-5 group-hover:-translate-x-1 transition-transform" /> Назад к сопровождению
+          </button>
+
+          <div className="space-y-8">
+            <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-gray-200/50 border border-gray-100">
+              <div className="flex flex-wrap items-start justify-between gap-6 mb-8">
+                <div>
+                  <span className="text-[10px] font-black text-teal-500 uppercase tracking-[0.2em]">Сопровождение</span>
+                  <h1 className="text-3xl font-black text-[#0F172A] tracking-tight mt-2">{s.title || 'Без названия'}</h1>
+                  <p className="text-gray-500 text-sm mt-1">Изменения сохраняются автоматически.</p>
+                </div>
+                <div className="text-right">
+                  <div className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-400 mb-1">Стоимость</div>
+                  <div className="text-2xl font-black text-teal-700 tabular-nums">{s.price.toLocaleString('ru-RU')} ₽</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Название / тип</label>
+                  <input
+                    type="text"
+                    defaultValue={s.title}
+                    key={s.id + s.title}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v && v !== s.title) patchSupportRecord(s.id, { title: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Контрагент</label>
+                  <input
+                    type="text"
+                    defaultValue={s.counterpartyName}
+                    key={s.id + s.counterpartyName}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v !== s.counterpartyName) patchSupportRecord(s.id, { counterpartyName: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Цена (₽)</label>
+                  <input
+                    type="text"
+                    defaultValue={s.price ? s.price.toLocaleString('ru-RU') : ''}
+                    key={s.id + '-price-' + s.price}
+                    onBlur={(e) => {
+                      const raw = parseFloat(e.target.value.replace(/\s/g, '')) || 0;
+                      if (raw !== s.price) patchSupportRecord(s.id, { price: raw });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Реквизиты контрагента</label>
+                  <textarea
+                    defaultValue={s.counterpartyDetails}
+                    key={s.id + s.counterpartyDetails}
+                    rows={4}
+                    placeholder="ИНН, КПП, расчётный счёт, банк, адрес…"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v !== s.counterpartyDetails) patchSupportRecord(s.id, { counterpartyDetails: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Что входит в сопровождение</label>
+                  <textarea
+                    defaultValue={s.description}
+                    key={s.id + s.description}
+                    rows={5}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v !== s.description) patchSupportRecord(s.id, { description: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y min-h-[120px]"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Комментарий</label>
+                  <textarea
+                    defaultValue={s.comment}
+                    key={s.id + s.comment}
+                    rows={3}
+                    placeholder="Внутренние заметки по договорённостям…"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v !== s.comment) patchSupportRecord(s.id, { comment: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-4 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-gray-200/50 border border-gray-100">
+              <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
+                <div>
+                  <h2 className="text-lg font-black text-[#0F172A]">График оплат</h2>
+                  <p className="text-sm text-gray-500 mt-1">Отметьте оплату — дата проставится автоматически, её можно изменить.</p>
+                </div>
+                <div className="text-sm font-semibold text-gray-600 tabular-nums">
+                  Оплачено: <span className="text-emerald-600">{paidTotal.toLocaleString('ru-RU')} ₽</span>
+                  {scheduleTotal > 0 && (
+                    <span className="text-gray-400"> / {scheduleTotal.toLocaleString('ru-RU')} ₽</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 p-5 bg-gray-50 rounded-2xl border border-gray-100">
+                <div>
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Дата</label>
+                  <input
+                    type="date"
+                    value={newPayDue}
+                    onChange={(e) => setNewPayDue(e.target.value)}
+                    className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2.5 outline-none focus:border-teal-500 text-sm font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Сумма (₽)</label>
+                  <input
+                    type="text"
+                    value={newPayAmount}
+                    onChange={(e) => setNewPayAmount(formatNumber(e.target.value))}
+                    placeholder="0"
+                    className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2.5 outline-none focus:border-teal-500 text-sm font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Назначение</label>
+                  <input
+                    type="text"
+                    value={newPayLabel}
+                    onChange={(e) => setNewPayLabel(e.target.value)}
+                    placeholder="Ежемесячная оплата"
+                    className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2.5 outline-none focus:border-teal-500 text-sm font-medium"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={() => addSupportPayment(s.id)}
+                    className="w-full bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2.5 rounded-xl transition-all text-sm"
+                  >
+                    Добавить в график
+                  </button>
+                </div>
+              </div>
+
+              {sortedSchedule.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-8 border-2 border-dashed border-gray-200 rounded-2xl">
+                  График пуст — добавьте первую дату оплаты выше
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {sortedSchedule.map((pay) => (
+                    <div
+                      key={pay.id}
+                      className={`flex flex-wrap items-center gap-4 p-4 rounded-2xl border transition-colors ${
+                        pay.isPaid ? 'bg-emerald-50/80 border-emerald-200' : 'bg-gray-50 border-gray-200'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleSupportPaymentPaid(s.id, pay.id)}
+                        className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all ${
+                          pay.isPaid
+                            ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/30'
+                            : 'bg-white border border-gray-300 text-gray-400 hover:border-teal-400 hover:text-teal-600'
+                        }`}
+                        title={pay.isPaid ? 'Оплачено' : 'Отметить оплату'}
+                      >
+                        <CheckCircle className="w-5 h-5" />
+                      </button>
+                      <input
+                        type="date"
+                        defaultValue={pay.dueDate.slice(0, 10)}
+                        key={pay.id + pay.dueDate}
+                        onBlur={(e) => {
+                          if (e.target.value && e.target.value !== pay.dueDate.slice(0, 10)) {
+                            updateSupportPayment(s.id, pay.id, { dueDate: e.target.value });
+                          }
+                        }}
+                        className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:border-teal-500"
+                      />
+                      <input
+                        type="text"
+                        defaultValue={pay.amount ? pay.amount.toLocaleString('ru-RU') : ''}
+                        key={pay.id + '-amt-' + pay.amount}
+                        onBlur={(e) => {
+                          const raw = parseFloat(e.target.value.replace(/\s/g, '')) || 0;
+                          if (raw !== pay.amount) updateSupportPayment(s.id, pay.id, { amount: raw });
+                        }}
+                        className="w-28 bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:border-teal-500 tabular-nums"
+                      />
+                      <span className="text-gray-400 text-sm font-bold">₽</span>
+                      <input
+                        type="text"
+                        defaultValue={pay.label}
+                        key={pay.id + pay.label}
+                        onBlur={(e) => {
+                          const v = e.target.value.trim();
+                          if (v !== pay.label) updateSupportPayment(s.id, pay.id, { label: v });
+                        }}
+                        className="flex-1 min-w-[120px] bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:border-teal-500"
+                      />
+                      {pay.isPaid && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-black uppercase text-emerald-600 tracking-wider">Оплачено</span>
+                          <input
+                            type="date"
+                            value={pay.paidAt?.slice(0, 10) || new Date().toISOString().slice(0, 10)}
+                            onChange={(e) =>
+                              updateSupportPayment(s.id, pay.id, { paidAt: e.target.value })
+                            }
+                            className="bg-white border border-emerald-200 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => removeSupportPayment(s.id, pay.id)}
+                        className="ml-auto p-2 text-gray-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
+                        title="Удалить из графика"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-gray-200/50 border border-gray-100">
+              <h2 className="text-lg font-black text-[#0F172A] mb-2">Договор</h2>
+              <p className="text-sm text-gray-500 mb-6">PDF, DOC или DOCX до 4 МБ. Файл хранится локально / в облаке вместе с CRM.</p>
+
+              {s.contract ? (
+                <div className="flex flex-wrap items-center gap-4 p-5 bg-teal-50/50 border border-teal-100 rounded-2xl">
+                  <Paperclip className="w-5 h-5 text-teal-600 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-bold text-[#0F172A] truncate">{s.contract.name}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      Загружен {format(new Date(s.contract.uploadedAt), 'd MMM yyyy, HH:mm', { locale: ru })}
+                    </div>
+                  </div>
+                  <a
+                    href={s.contract.dataUrl}
+                    download={s.contract.name}
+                    className="inline-flex items-center gap-2 bg-white border border-teal-200 text-teal-700 font-bold px-4 py-2.5 rounded-xl hover:bg-teal-50 transition-all text-sm"
+                  >
+                    <Download className="w-4 h-4" /> Скачать
+                  </a>
+                  <label className="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2.5 rounded-xl cursor-pointer transition-all text-sm">
+                    <UploadCloud className="w-4 h-4" /> Заменить
+                    <input
+                      type="file"
+                      accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) uploadSupportContract(s.id, f);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => removeSupportContract(s.id)}
+                    className="p-2.5 text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
+                    title="Удалить договор"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center gap-3 p-12 border-2 border-dashed border-gray-200 rounded-2xl cursor-pointer hover:border-teal-300 hover:bg-teal-50/30 transition-all">
+                  <UploadCloud className="w-10 h-10 text-teal-400" />
+                  <span className="font-bold text-gray-600">Прикрепить договор</span>
+                  <span className="text-xs text-gray-400">PDF, DOC, DOCX — до 4 МБ</span>
+                  <input
+                    type="file"
+                    accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) uploadSupportContract(s.id, f);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+              )}
+            </div>
+
+            <div className="flex justify-between items-center gap-4 pb-10">
+              <button
+                type="button"
+                onClick={() => deleteSupportRecord(s.id)}
+                className="text-rose-600 font-bold text-sm hover:underline"
+              >
+                Удалить сопровождение
+              </button>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   if (selectedWorkProject) {
     const w = selectedWorkProject;
@@ -1566,7 +2156,7 @@ function App() {
 
         <nav className="flex-1 px-4 space-y-1.5 mt-6">
           <button 
-            onClick={() => { setActiveTab('projects'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('projects'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'projects' ? 'bg-blue-600/10 text-blue-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1574,7 +2164,7 @@ function App() {
             <LayoutGrid className="w-5 h-5" /> Проекты
           </button>
           <button 
-            onClick={() => { setActiveTab('work'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('work'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'work' ? 'bg-indigo-500/15 text-indigo-300' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1582,7 +2172,15 @@ function App() {
             <FolderKanban className="w-5 h-5" /> В работе
           </button>
           <button 
-            onClick={() => { setActiveTab('employees'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('support'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
+            className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
+              activeTab === 'support' ? 'bg-teal-500/15 text-teal-300' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
+            }`}
+          >
+            <LifeBuoy className="w-5 h-5" /> Сопровождение
+          </button>
+          <button 
+            onClick={() => { setActiveTab('employees'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'employees' ? 'bg-blue-600/10 text-blue-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1590,7 +2188,7 @@ function App() {
             <User className="w-5 h-5" /> Сотрудники
           </button>
           <button 
-            onClick={() => { setActiveTab('leads'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('leads'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'leads' ? 'bg-blue-600/10 text-blue-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1598,7 +2196,7 @@ function App() {
             <Users className="w-5 h-5" /> Лиды
           </button>
           <button 
-            onClick={() => { setActiveTab('logs'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('logs'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'logs' ? 'bg-blue-600/10 text-blue-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1606,7 +2204,7 @@ function App() {
             <Activity className="w-5 h-5" /> Логи
           </button>
           <button 
-            onClick={() => { setActiveTab('tasks'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('tasks'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'tasks' ? 'bg-blue-600/10 text-blue-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1614,7 +2212,7 @@ function App() {
             <List className="w-5 h-5" /> Задачи
           </button>
           <button
-            onClick={() => { setActiveTab('finance'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('finance'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'finance' ? 'bg-yellow-500/10 text-yellow-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1622,7 +2220,7 @@ function App() {
             <Wallet className="w-5 h-5" /> Финансы
           </button>
           <button
-            onClick={() => { setActiveTab('traffic'); setSelectedProject(null); setSelectedWorkProject(null); }}
+            onClick={() => { setActiveTab('traffic'); setSelectedProject(null); setSelectedWorkProject(null); setSelectedSupport(null); }}
             className={`w-full flex items-center gap-3 px-5 py-3.5 rounded-2xl font-semibold transition-all ${
               activeTab === 'traffic' ? 'bg-emerald-500/10 text-emerald-400' : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
             }`}
@@ -1659,7 +2257,9 @@ function App() {
                   ? 'Поиск по активным проектам...'
                   : activeTab === 'work'
                     ? 'Поиск по заказам и заказчикам...'
-                    : activeTab === 'employees'
+                    : activeTab === 'support'
+                      ? 'Поиск по сопровождению и контрагентам...'
+                      : activeTab === 'employees'
                       ? 'Поиск по специалистам...'
                       : 'Поиск...'
               }
@@ -1836,7 +2436,7 @@ function App() {
                 filteredProjects.map(p => (
                   <div 
                     key={p.id} 
-                    onClick={() => { setSelectedWorkProject(null); setSelectedProject(p); }}
+                    onClick={() => { setSelectedWorkProject(null); setSelectedSupport(null); setSelectedProject(p); }}
                     className={`bg-white rounded-[2rem] border border-gray-200/70 p-7 shadow-lg shadow-gray-200/40 hover:shadow-2xl hover:shadow-gray-300/50 transition-all group relative overflow-hidden cursor-pointer ${view === 'list' ? 'flex items-center justify-between py-6' : ''}`}
                   >
                     <div className={view === 'list' ? 'flex items-center gap-10 flex-1' : ''}>
@@ -2032,6 +2632,7 @@ function App() {
                     onClick={() => {
                       if (suppressWorkCardClickRef.current) return;
                       setSelectedProject(null);
+                      setSelectedSupport(null);
                       setSelectedWorkProject(item);
                     }}
                     onKeyDown={(e) => {
@@ -2111,6 +2712,194 @@ function App() {
                     </div>
                   </div>
                 ))
+              )}
+            </div>
+          </div>
+        ) : activeTab === 'support' ? (
+          <div className="p-10 max-w-7xl mx-auto w-full">
+            <div className="mb-10 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <h1 className="text-3xl font-black text-[#0F172A] tracking-tight">Сопровождение</h1>
+                <p className="text-gray-500 font-medium mt-1.5 max-w-2xl">
+                  Договоры на сопровождение: контрагент, реквизиты, график оплат и прикреплённый договор.
+                </p>
+              </div>
+              <div className="rounded-[1.5rem] border border-teal-100 bg-gradient-to-br from-teal-50 to-white px-8 py-5 shadow-lg shadow-teal-100/60 shrink-0">
+                <div className="text-[10px] font-black uppercase tracking-[0.2em] text-teal-500/80 mb-1">Сумма всех договоров</div>
+                <div className="text-3xl font-black text-teal-700 tabular-nums">
+                  {supportRecords.reduce((sum, r) => sum + (Number(r.price) || 0), 0).toLocaleString('ru-RU')} ₽
+                </div>
+                <div className="text-xs font-semibold text-gray-500 mt-1">
+                  {(() => {
+                    const n = supportRecords.length;
+                    const w =
+                      n % 10 === 1 && n % 100 !== 11
+                        ? 'договор'
+                        : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)
+                          ? 'договора'
+                          : 'договоров';
+                    return `${n} ${w}`;
+                  })()}
+                </div>
+              </div>
+            </div>
+
+            <section className="bg-white rounded-[2rem] border border-gray-200/60 p-8 mb-12 shadow-xl shadow-gray-200/40">
+              <form onSubmit={addSupportRecord} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Название / тип сопровождения *</label>
+                  <input
+                    type="text"
+                    value={supTitle}
+                    onChange={(e) => setSupTitle(e.target.value)}
+                    placeholder="Например: Техподдержка сайта"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Контрагент</label>
+                  <input
+                    type="text"
+                    value={supCounterpartyName}
+                    onChange={(e) => setSupCounterpartyName(e.target.value)}
+                    placeholder="ООО или ФИО"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Цена (₽)</label>
+                  <input
+                    type="text"
+                    value={supPrice}
+                    onChange={(e) => setSupPrice(formatNumber(e.target.value))}
+                    placeholder="0"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Реквизиты контрагента</label>
+                  <textarea
+                    value={supCounterpartyDetails}
+                    onChange={(e) => setSupCounterpartyDetails(e.target.value)}
+                    rows={3}
+                    placeholder="ИНН, счёт, банк…"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Что входит в сопровождение</label>
+                  <textarea
+                    value={supDescription}
+                    onChange={(e) => setSupDescription(e.target.value)}
+                    rows={3}
+                    placeholder="Обновления, мониторинг, правки…"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Комментарий</label>
+                  <textarea
+                    value={supComment}
+                    onChange={(e) => setSupComment(e.target.value)}
+                    rows={2}
+                    placeholder="Внутренние заметки"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium resize-y"
+                  />
+                </div>
+                <div className="md:col-span-2 flex justify-end">
+                  <button
+                    type="submit"
+                    className="bg-teal-600 hover:bg-teal-700 text-white font-bold px-10 py-4 rounded-2xl flex items-center gap-2 shadow-lg shadow-teal-500/25 transition-all active:scale-95"
+                  >
+                    <Plus className="w-5 h-5" /> Создать сопровождение
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+              {filteredSupportRecords.length === 0 ? (
+                <div className="col-span-full py-20 text-center bg-gray-50 rounded-[2.5rem] border-2 border-dashed border-gray-200">
+                  <LifeBuoy className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                  <h3 className="text-lg font-bold text-gray-400">Пока нет сопровождений</h3>
+                  <p className="text-gray-400 text-sm mt-1">Создайте первое через форму выше</p>
+                </div>
+              ) : (
+                filteredSupportRecords.map((item) => {
+                  const paidCount = item.paymentSchedule.filter(p => p.isPaid).length;
+                  const totalPayments = item.paymentSchedule.length;
+                  return (
+                    <div
+                      key={item.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setSelectedProject(null);
+                        setSelectedWorkProject(null);
+                        setSelectedSupport(item);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSelectedProject(null);
+                          setSelectedWorkProject(null);
+                          setSelectedSupport(item);
+                        }
+                      }}
+                      className="bg-white rounded-[2rem] border border-gray-200/70 p-7 shadow-lg shadow-gray-200/40 hover:shadow-2xl hover:border-teal-200 transition-all cursor-pointer text-left group relative"
+                    >
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteSupportRecord(item.id);
+                        }}
+                        className="absolute top-5 right-5 p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-xl opacity-0 group-hover:opacity-100 transition-all"
+                        title="Удалить"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                      <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border mb-4 bg-teal-50 text-teal-600 border-teal-100">
+                        <LifeBuoy className="w-3 h-3" /> Сопровождение
+                      </div>
+                      <h3 className="text-xl font-extrabold text-[#0F172A] mb-3 group-hover:text-teal-600 transition-colors line-clamp-2 pr-8">
+                        {item.title}
+                      </h3>
+                      <div className="space-y-3 text-sm">
+                        <div className="flex items-center gap-2 text-gray-600">
+                          <UserCircle className="w-4 h-4 text-teal-500 shrink-0" />
+                          <span className="font-semibold truncate">{item.counterpartyName || '—'}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-gray-600">
+                          <Wallet className="w-4 h-4 text-emerald-500 shrink-0" />
+                          <span className="font-bold">{item.price.toLocaleString('ru-RU')} ₽</span>
+                        </div>
+                        {totalPayments > 0 && (
+                          <div className="flex items-center gap-2 text-gray-600">
+                            <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
+                            <span className="font-medium">
+                              Оплаты: {paidCount}/{totalPayments}
+                            </span>
+                          </div>
+                        )}
+                        {item.contract && (
+                          <div className="flex items-center gap-2 text-gray-600">
+                            <Paperclip className="w-4 h-4 text-teal-500 shrink-0" />
+                            <span className="font-medium truncate">{item.contract.name}</span>
+                          </div>
+                        )}
+                      </div>
+                      {item.description.trim() ? (
+                        <p className="mt-4 text-xs text-gray-500 line-clamp-2 border-t border-gray-100 pt-4">{item.description}</p>
+                      ) : null}
+                      <div className="mt-6 flex justify-end">
+                        <span className="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center group-hover:bg-teal-600 group-hover:text-white transition-all">
+                          <ChevronRight className="w-5 h-5" />
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
@@ -2213,6 +3002,7 @@ function App() {
                                       type="button"
                                       onClick={() => {
                                         setSelectedWorkProject(null);
+                                        setSelectedSupport(null);
                                         setActiveTab('projects');
                                         setSelectedProject(p);
                                       }}
@@ -2352,8 +3142,8 @@ function App() {
                     <input 
                       type="tel" 
                       value={newLead.phone}
-                      onChange={(e) => setNewLead({...newLead, phone: e.target.value})}
-                      placeholder="+7 (999) 000-00-00"
+                      onChange={(e) => setNewLead({...newLead, phone: formatPhoneRu(e.target.value)})}
+                      placeholder="+7 (999) 919-62-61"
                       className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all font-medium"
                     />
                   </div>
@@ -2424,6 +3214,7 @@ function App() {
                           setPriceInput(formatNumber(l.budget.toString()));
                           setSelectedLead(l);
                           setSelectedWorkProject(null);
+                          setSelectedSupport(null);
                           setActiveTab('projects');
                         }}
                         className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-xl transition-all"
@@ -2441,7 +3232,7 @@ function App() {
                   </div>
                   <h3 className="text-xl font-black text-[#0F172A] mb-1">{l.name}</h3>
                   <div className="flex items-center gap-2 text-gray-500 text-sm font-medium mb-4">
-                    <Phone className="w-3.5 h-3.5" /> {l.phone}
+                    <Phone className="w-3.5 h-3.5" /> {displayPhone(l.phone)}
                   </div>
                   
                   <div className="grid grid-cols-2 gap-4 mb-6">
