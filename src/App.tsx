@@ -11,9 +11,14 @@ import {
   Activity, Users,
   Phone, UserCircle,
   TrendingUp, Target, MessageSquare, Tag, Radio,
-  FolderKanban, GripVertical, LifeBuoy, Download
+  FolderKanban, GripVertical, LifeBuoy, Download,
+  Calendar, ChevronLeft, FileCheck
 } from 'lucide-react';
-import { format, addDays, differenceInSeconds, isPast, differenceInHours } from 'date-fns';
+import {
+  format, addDays, differenceInSeconds, isPast, differenceInHours,
+  addMonths, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth,
+  isWithinInterval, parseISO, startOfWeek, endOfWeek, isToday
+} from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { loadKeyFromStorage, persistKey, flushCloudSnapshot, isCloudSyncEnabled, isElectron } from './lib/crmStorage';
 
@@ -116,6 +121,19 @@ interface SupportPaymentEntry {
   note?: string;
 }
 
+type SupportEventType = 'act' | 'payment' | 'comment';
+
+interface SupportCalendarEvent {
+  id: string;
+  date: string;
+  type: SupportEventType;
+  amount?: number;
+  isPaid?: boolean;
+  paidAt?: string;
+  title?: string;
+  text?: string;
+}
+
 interface SupportRecord {
   id: string;
   /** Название / тип сопровождения */
@@ -127,7 +145,13 @@ interface SupportRecord {
   counterpartyName: string;
   /** Реквизиты контрагента */
   counterpartyDetails: string;
-  paymentSchedule: SupportPaymentEntry[];
+  /** Срок договора в месяцах */
+  contractDurationMonths: number;
+  /** Дата начала договора (yyyy-MM-dd) */
+  contractStartDate: string;
+  calendarEvents: SupportCalendarEvent[];
+  /** @deprecated — мигрируется в calendarEvents */
+  paymentSchedule?: SupportPaymentEntry[];
   contract?: SupportContractFile;
   createdAt: string;
   updatedAt: string;
@@ -135,7 +159,79 @@ interface SupportRecord {
 
 const MAX_CONTRACT_BYTES = 4 * 1024 * 1024;
 
+const SUPPORT_EVENT_META: Record<
+  SupportEventType,
+  { label: string; short: string; color: string; bg: string; border: string }
+> = {
+  act: {
+    label: 'Акт по техподдержке',
+    short: 'Акт',
+    color: 'text-blue-700',
+    bg: 'bg-blue-50',
+    border: 'border-blue-200',
+  },
+  payment: {
+    label: 'Оплата контрагента',
+    short: 'Оплата',
+    color: 'text-emerald-700',
+    bg: 'bg-emerald-50',
+    border: 'border-emerald-200',
+  },
+  comment: {
+    label: 'Комментарий',
+    short: 'Заметка',
+    color: 'text-gray-700',
+    bg: 'bg-gray-50',
+    border: 'border-gray-200',
+  },
+};
+
+function normalizeCalendarEvent(raw: Partial<SupportCalendarEvent>): SupportCalendarEvent {
+  const type: SupportEventType =
+    raw.type === 'act' || raw.type === 'payment' || raw.type === 'comment' ? raw.type : 'comment';
+  return {
+    id: raw.id || crypto.randomUUID(),
+    date: (raw.date || new Date().toISOString()).slice(0, 10),
+    type,
+    amount: typeof raw.amount === 'number' && !Number.isNaN(raw.amount) ? raw.amount : 0,
+    isPaid: !!raw.isPaid,
+    paidAt: raw.paidAt?.slice(0, 10),
+    title: raw.title || '',
+    text: raw.text || '',
+  };
+}
+
+function migratePaymentScheduleToEvents(schedule: SupportPaymentEntry[]): SupportCalendarEvent[] {
+  return schedule.map(p => ({
+    id: p.id || crypto.randomUUID(),
+    date: (p.dueDate || new Date().toISOString()).slice(0, 10),
+    type: 'payment' as const,
+    amount: Number(p.amount) || 0,
+    isPaid: !!p.isPaid,
+    paidAt: p.paidAt?.slice(0, 10),
+    title: p.label || 'Оплата контрагента',
+    text: p.note || '',
+  }));
+}
+
+function supportContractEndDate(start: string, months: number): Date | null {
+  if (!start || !months || months < 1) return null;
+  const d = parseISO(start);
+  if (Number.isNaN(d.getTime())) return null;
+  return addMonths(d, months);
+}
+
 function normalizeSupportRecord(raw: Partial<SupportRecord>): SupportRecord {
+  let calendarEvents = Array.isArray(raw.calendarEvents)
+    ? raw.calendarEvents.map(normalizeCalendarEvent)
+    : [];
+  if (
+    calendarEvents.length === 0 &&
+    Array.isArray(raw.paymentSchedule) &&
+    raw.paymentSchedule.length > 0
+  ) {
+    calendarEvents = migratePaymentScheduleToEvents(raw.paymentSchedule);
+  }
   return {
     id: raw.id || crypto.randomUUID(),
     title: raw.title || '',
@@ -144,17 +240,12 @@ function normalizeSupportRecord(raw: Partial<SupportRecord>): SupportRecord {
     price: typeof raw.price === 'number' && !Number.isNaN(raw.price) ? raw.price : 0,
     counterpartyName: raw.counterpartyName || '',
     counterpartyDetails: raw.counterpartyDetails || '',
-    paymentSchedule: Array.isArray(raw.paymentSchedule)
-      ? raw.paymentSchedule.map(e => ({
-          id: e.id || crypto.randomUUID(),
-          dueDate: e.dueDate || new Date().toISOString(),
-          amount: Number(e.amount) || 0,
-          label: e.label || '',
-          isPaid: !!e.isPaid,
-          paidAt: e.paidAt,
-          note: e.note || '',
-        }))
-      : [],
+    contractDurationMonths:
+      typeof raw.contractDurationMonths === 'number' && !Number.isNaN(raw.contractDurationMonths)
+        ? Math.max(0, Math.round(raw.contractDurationMonths))
+        : 0,
+    contractStartDate: (raw.contractStartDate || '').slice(0, 10),
+    calendarEvents,
     contract: raw.contract?.dataUrl ? raw.contract : undefined,
     createdAt: raw.createdAt || new Date().toISOString(),
     updatedAt: raw.updatedAt || new Date().toISOString(),
@@ -321,9 +412,14 @@ function App() {
   const [supPrice, setSupPrice] = useState('');
   const [supCounterpartyName, setSupCounterpartyName] = useState('');
   const [supCounterpartyDetails, setSupCounterpartyDetails] = useState('');
-  const [newPayDue, setNewPayDue] = useState('');
-  const [newPayAmount, setNewPayAmount] = useState('');
-  const [newPayLabel, setNewPayLabel] = useState('');
+  const [supDurationMonths, setSupDurationMonths] = useState('12');
+  const [supStartDate, setSupStartDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const [supCalViewMonth, setSupCalViewMonth] = useState(() => startOfMonth(new Date()));
+  const [supCalActiveDate, setSupCalActiveDate] = useState<string | null>(null);
+  const [supEventModal, setSupEventModal] = useState<{ type: SupportEventType; date: string } | null>(null);
+  const [supEventAmount, setSupEventAmount] = useState('');
+  const [supEventText, setSupEventText] = useState('');
+  const [supEventTitle, setSupEventTitle] = useState('');
   const [wpTitle, setWpTitle] = useState('');
   const [wpPrice, setWpPrice] = useState('');
   const [wpCustomer, setWpCustomer] = useState('');
@@ -718,10 +814,25 @@ function App() {
     );
   };
 
+  useEffect(() => {
+    if (selectedSupport?.contractStartDate) {
+      const d = parseISO(selectedSupport.contractStartDate);
+      if (!Number.isNaN(d.getTime())) setSupCalViewMonth(startOfMonth(d));
+    } else {
+      setSupCalViewMonth(startOfMonth(new Date()));
+    }
+    setSupCalActiveDate(null);
+    setSupEventModal(null);
+    setSupEventAmount('');
+    setSupEventText('');
+    setSupEventTitle('');
+  }, [selectedSupport?.id]);
+
   const addSupportRecord = (e: React.FormEvent) => {
     e.preventDefault();
     if (!supTitle.trim()) return;
     const ts = new Date().toISOString();
+    const months = Math.max(0, parseInt(supDurationMonths, 10) || 0);
     const record: SupportRecord = {
       id: crypto.randomUUID(),
       title: supTitle.trim(),
@@ -730,7 +841,9 @@ function App() {
       price: parseFloat(supPrice.replace(/\s/g, '')) || 0,
       counterpartyName: supCounterpartyName.trim(),
       counterpartyDetails: supCounterpartyDetails.trim(),
-      paymentSchedule: [],
+      contractDurationMonths: months,
+      contractStartDate: supStartDate || format(new Date(), 'yyyy-MM-dd'),
+      calendarEvents: [],
       createdAt: ts,
       updatedAt: ts,
     };
@@ -744,6 +857,8 @@ function App() {
     setSupPrice('');
     setSupCounterpartyName('');
     setSupCounterpartyDetails('');
+    setSupDurationMonths('12');
+    setSupStartDate(format(new Date(), 'yyyy-MM-dd'));
   };
 
   const patchSupportRecord = (id: string, patch: Partial<SupportRecord>) => {
@@ -771,55 +886,123 @@ function App() {
     addLog('Сопровождение', `Удалено: ${rec?.title ?? id}`);
   };
 
-  const addSupportPayment = (supportId: string) => {
-    if (!newPayDue.trim()) return;
-    const entry: SupportPaymentEntry = {
-      id: crypto.randomUUID(),
-      dueDate: newPayDue,
-      amount: parseFloat(newPayAmount.replace(/\s/g, '')) || 0,
-      label: newPayLabel.trim() || 'Оплата',
-      isPaid: false,
-    };
-    const rec = supportRecords.find(r => r.id === supportId);
-    if (!rec) return;
-    const schedule = [...rec.paymentSchedule, entry];
-    patchSupportRecord(supportId, { paymentSchedule: schedule });
-    setNewPayDue('');
-    setNewPayAmount('');
-    setNewPayLabel('');
-  };
-
-  const updateSupportPayment = (
+  const addSupportCalendarEvent = (
     supportId: string,
-    paymentId: string,
-    patch: Partial<SupportPaymentEntry>
+    date: string,
+    type: SupportEventType,
+    data: { amount?: number; title?: string; text?: string; isPaid?: boolean }
   ) => {
     const rec = supportRecords.find(r => r.id === supportId);
     if (!rec) return;
-    const schedule = rec.paymentSchedule.map(p =>
-      p.id === paymentId ? { ...p, ...patch } : p
-    );
-    patchSupportRecord(supportId, { paymentSchedule: schedule });
+    const entry = normalizeCalendarEvent({
+      id: crypto.randomUUID(),
+      date: date.slice(0, 10),
+      type,
+      amount: type === 'payment' ? data.amount ?? rec.price : 0,
+      isPaid: type === 'payment' ? !!data.isPaid : false,
+      paidAt: type === 'payment' && data.isPaid ? date.slice(0, 10) : undefined,
+      title:
+        data.title?.trim() ||
+        (type === 'act'
+          ? 'Акт по техподдержке'
+          : type === 'payment'
+            ? 'Оплата контрагента'
+            : ''),
+      text: data.text?.trim() || '',
+    });
+    patchSupportRecord(supportId, {
+      calendarEvents: [...rec.calendarEvents, entry],
+    });
+    addLog('Сопровождение', `${SUPPORT_EVENT_META[type].label} — ${format(parseISO(date), 'd MMM yyyy', { locale: ru })}`);
   };
 
-  const toggleSupportPaymentPaid = (supportId: string, paymentId: string) => {
+  const updateSupportCalendarEvent = (
+    supportId: string,
+    eventId: string,
+    patch: Partial<SupportCalendarEvent>
+  ) => {
     const rec = supportRecords.find(r => r.id === supportId);
     if (!rec) return;
-    const entry = rec.paymentSchedule.find(p => p.id === paymentId);
-    if (!entry) return;
-    const isPaid = !entry.isPaid;
-    updateSupportPayment(supportId, paymentId, {
+    const events = rec.calendarEvents.map(ev =>
+      ev.id === eventId ? normalizeCalendarEvent({ ...ev, ...patch }) : ev
+    );
+    patchSupportRecord(supportId, { calendarEvents: events });
+  };
+
+  const toggleSupportEventPaid = (supportId: string, eventId: string) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    const ev = rec.calendarEvents.find(e => e.id === eventId);
+    if (!ev || ev.type !== 'payment') return;
+    const isPaid = !ev.isPaid;
+    updateSupportCalendarEvent(supportId, eventId, {
       isPaid,
-      paidAt: isPaid ? new Date().toISOString().slice(0, 10) : undefined,
+      paidAt: isPaid ? format(new Date(), 'yyyy-MM-dd') : undefined,
     });
   };
 
-  const removeSupportPayment = (supportId: string, paymentId: string) => {
+  const removeSupportCalendarEvent = (supportId: string, eventId: string) => {
     const rec = supportRecords.find(r => r.id === supportId);
     if (!rec) return;
     patchSupportRecord(supportId, {
-      paymentSchedule: rec.paymentSchedule.filter(p => p.id !== paymentId),
+      calendarEvents: rec.calendarEvents.filter(e => e.id !== eventId),
     });
+  };
+
+  const generateSupportMonthlyPayments = (supportId: string) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec || !rec.contractStartDate || rec.contractDurationMonths < 1) return;
+    const start = parseISO(rec.contractStartDate);
+    if (Number.isNaN(start.getTime())) return;
+    const existingPaymentDates = new Set(
+      rec.calendarEvents.filter(e => e.type === 'payment').map(e => e.date.slice(0, 10))
+    );
+    const newEvents: SupportCalendarEvent[] = [];
+    for (let i = 0; i < rec.contractDurationMonths; i++) {
+      const d = addMonths(start, i);
+      const dateStr = format(d, 'yyyy-MM-dd');
+      if (existingPaymentDates.has(dateStr)) continue;
+      newEvents.push(
+        normalizeCalendarEvent({
+          id: crypto.randomUUID(),
+          date: dateStr,
+          type: 'payment',
+          amount: rec.price,
+          isPaid: false,
+          title: `Оплата за ${format(d, 'LLLL yyyy', { locale: ru })}`,
+        })
+      );
+    }
+    if (newEvents.length === 0) return;
+    patchSupportRecord(supportId, {
+      calendarEvents: [...rec.calendarEvents, ...newEvents],
+    });
+    addLog('Сопровождение', `Сгенерирован график: ${newEvents.length} оплат`);
+  };
+
+  const openSupportEventModal = (type: SupportEventType, date: string, defaultAmount?: number) => {
+    setSupEventModal({ type, date });
+    setSupEventAmount(defaultAmount ? formatNumber(String(defaultAmount)) : '');
+    setSupEventText('');
+    setSupEventTitle(
+      type === 'act' ? 'Акт по техподдержке' : type === 'payment' ? 'Оплата контрагента' : ''
+    );
+  };
+
+  const submitSupportEventModal = (supportId: string) => {
+    if (!supEventModal) return;
+    const { type, date } = supEventModal;
+    if (type === 'comment' && !supEventText.trim()) return;
+    addSupportCalendarEvent(supportId, date, type, {
+      amount: parseFloat(supEventAmount.replace(/\s/g, '')) || 0,
+      title: supEventTitle,
+      text: supEventText,
+      isPaid: false,
+    });
+    setSupEventModal(null);
+    setSupEventAmount('');
+    setSupEventText('');
+    setSupEventTitle('');
   };
 
   const uploadSupportContract = async (supportId: string, file: File) => {
@@ -1219,15 +1402,32 @@ function App() {
 
   if (selectedSupport) {
     const s = selectedSupport;
-    const paidTotal = s.paymentSchedule.filter(p => p.isPaid).reduce((sum, p) => sum + p.amount, 0);
-    const scheduleTotal = s.paymentSchedule.reduce((sum, p) => sum + p.amount, 0);
-    const sortedSchedule = [...s.paymentSchedule].sort(
-      (a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()
-    );
+    const paymentEvents = s.calendarEvents.filter(e => e.type === 'payment');
+    const paidTotal = paymentEvents.filter(p => p.isPaid).reduce((sum, p) => sum + (p.amount || 0), 0);
+    const scheduleTotal = paymentEvents.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const contractEnd = supportContractEndDate(s.contractStartDate, s.contractDurationMonths);
+    const calMonthStart = startOfMonth(supCalViewMonth);
+    const calMonthEnd = endOfMonth(supCalViewMonth);
+    const calGridStart = startOfWeek(calMonthStart, { weekStartsOn: 1 });
+    const calGridEnd = endOfWeek(calMonthEnd, { weekStartsOn: 1 });
+    const calDays = eachDayOfInterval({ start: calGridStart, end: calGridEnd });
+    const eventsByDate = s.calendarEvents.reduce<Record<string, SupportCalendarEvent[]>>((acc, ev) => {
+      const d = ev.date.slice(0, 10);
+      if (!acc[d]) acc[d] = [];
+      acc[d].push(ev);
+      return acc;
+    }, {});
+    const activeDayEvents = supCalActiveDate ? eventsByDate[supCalActiveDate] || [] : [];
+    const contractStartParsed = s.contractStartDate ? parseISO(s.contractStartDate) : null;
+
+    const isInContractPeriod = (day: Date) => {
+      if (!contractStartParsed || !contractEnd || Number.isNaN(contractStartParsed.getTime())) return false;
+      return isWithinInterval(day, { start: contractStartParsed, end: contractEnd });
+    };
 
     return (
       <div className="flex h-screen bg-[#F8FAFC] text-[#1E293B] font-['Inter',sans-serif]">
-        <main className="flex-1 overflow-y-auto p-10 max-w-4xl mx-auto w-full">
+        <main className="flex-1 overflow-y-auto p-10 max-w-5xl mx-auto w-full">
           <button
             type="button"
             onClick={() => {
@@ -1293,6 +1493,38 @@ function App() {
                     className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
                   />
                 </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Срок договора (мес.)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    defaultValue={s.contractDurationMonths || ''}
+                    key={s.id + '-months-' + s.contractDurationMonths}
+                    onBlur={(e) => {
+                      const v = Math.max(0, parseInt(e.target.value, 10) || 0);
+                      if (v !== s.contractDurationMonths) patchSupportRecord(s.id, { contractDurationMonths: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Дата начала договора</label>
+                  <input
+                    type="date"
+                    defaultValue={s.contractStartDate}
+                    key={s.id + s.contractStartDate}
+                    onBlur={(e) => {
+                      const v = e.target.value;
+                      if (v !== s.contractStartDate) patchSupportRecord(s.id, { contractStartDate: v });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                  {contractEnd && (
+                    <p className="text-xs text-teal-600 font-semibold mt-2">
+                      До {format(contractEnd, 'd MMMM yyyy', { locale: ru })}
+                    </p>
+                  )}
+                </div>
                 <div className="md:col-span-2">
                   <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Реквизиты контрагента</label>
                   <textarea
@@ -1340,138 +1572,302 @@ function App() {
             <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-gray-200/50 border border-gray-100">
               <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
                 <div>
-                  <h2 className="text-lg font-black text-[#0F172A]">График оплат</h2>
-                  <p className="text-sm text-gray-500 mt-1">Отметьте оплату — дата проставится автоматически, её можно изменить.</p>
+                  <h2 className="text-lg font-black text-[#0F172A] flex items-center gap-2">
+                    <Calendar className="w-5 h-5 text-teal-600" /> Календарь сопровождения
+                  </h2>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Нажмите на дату — добавьте акт, оплату или комментарий. Срок договора подсвечен на календаре.
+                  </p>
                 </div>
-                <div className="text-sm font-semibold text-gray-600 tabular-nums">
-                  Оплачено: <span className="text-emerald-600">{paidTotal.toLocaleString('ru-RU')} ₽</span>
-                  {scheduleTotal > 0 && (
-                    <span className="text-gray-400"> / {scheduleTotal.toLocaleString('ru-RU')} ₽</span>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="text-sm font-semibold text-gray-600 tabular-nums">
+                    Оплачено: <span className="text-emerald-600">{paidTotal.toLocaleString('ru-RU')} ₽</span>
+                    {scheduleTotal > 0 && (
+                      <span className="text-gray-400"> / {scheduleTotal.toLocaleString('ru-RU')} ₽</span>
+                    )}
+                  </div>
+                  {s.contractDurationMonths > 0 && s.contractStartDate && (
+                    <button
+                      type="button"
+                      onClick={() => generateSupportMonthlyPayments(s.id)}
+                      className="text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 px-4 py-2 rounded-xl transition-all"
+                    >
+                      Сгенерировать {s.contractDurationMonths} оплат
+                    </button>
                   )}
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 p-5 bg-gray-50 rounded-2xl border border-gray-100">
-                <div>
-                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Дата</label>
-                  <input
-                    type="date"
-                    value={newPayDue}
-                    onChange={(e) => setNewPayDue(e.target.value)}
-                    className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2.5 outline-none focus:border-teal-500 text-sm font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Сумма (₽)</label>
-                  <input
-                    type="text"
-                    value={newPayAmount}
-                    onChange={(e) => setNewPayAmount(formatNumber(e.target.value))}
-                    placeholder="0"
-                    className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2.5 outline-none focus:border-teal-500 text-sm font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Назначение</label>
-                  <input
-                    type="text"
-                    value={newPayLabel}
-                    onChange={(e) => setNewPayLabel(e.target.value)}
-                    placeholder="Ежемесячная оплата"
-                    className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2.5 outline-none focus:border-teal-500 text-sm font-medium"
-                  />
-                </div>
-                <div className="flex items-end">
-                  <button
-                    type="button"
-                    onClick={() => addSupportPayment(s.id)}
-                    className="w-full bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2.5 rounded-xl transition-all text-sm"
-                  >
-                    Добавить в график
-                  </button>
-                </div>
+              <div className="flex items-center justify-between mb-4">
+                <button
+                  type="button"
+                  onClick={() => setSupCalViewMonth(prev => addMonths(prev, -1))}
+                  className="p-2.5 rounded-xl hover:bg-gray-100 text-gray-600 transition-all"
+                  aria-label="Предыдущий месяц"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+                <h3 className="text-base font-black text-[#0F172A] capitalize">
+                  {format(supCalViewMonth, 'LLLL yyyy', { locale: ru })}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSupCalViewMonth(prev => addMonths(prev, 1))}
+                  className="p-2.5 rounded-xl hover:bg-gray-100 text-gray-600 transition-all rotate-180"
+                  aria-label="Следующий месяц"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
               </div>
 
-              {sortedSchedule.length === 0 ? (
-                <p className="text-sm text-gray-400 text-center py-8 border-2 border-dashed border-gray-200 rounded-2xl">
-                  График пуст — добавьте первую дату оплаты выше
-                </p>
-              ) : (
-                <div className="space-y-3">
-                  {sortedSchedule.map((pay) => (
-                    <div
-                      key={pay.id}
-                      className={`flex flex-wrap items-center gap-4 p-4 rounded-2xl border transition-colors ${
-                        pay.isPaid ? 'bg-emerald-50/80 border-emerald-200' : 'bg-gray-50 border-gray-200'
-                      }`}
+              <div className="grid grid-cols-7 gap-1 mb-1">
+                {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(wd => (
+                  <div key={wd} className="text-center text-[10px] font-black text-gray-400 uppercase py-2">
+                    {wd}
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-7 gap-1 mb-8">
+                {calDays.map(day => {
+                  const dateStr = format(day, 'yyyy-MM-dd');
+                  const inMonth = isSameMonth(day, supCalViewMonth);
+                  const dayEvents = eventsByDate[dateStr] || [];
+                  const isActive = supCalActiveDate === dateStr;
+                  const inContract = isInContractPeriod(day);
+                  return (
+                    <button
+                      key={dateStr}
+                      type="button"
+                      onClick={() => setSupCalActiveDate(dateStr)}
+                      className={`min-h-[72px] p-1.5 rounded-xl border text-left transition-all flex flex-col ${
+                        !inMonth ? 'opacity-35' : ''
+                      } ${
+                        isActive
+                          ? 'border-teal-500 bg-teal-50 ring-2 ring-teal-500/20 shadow-md'
+                          : inContract
+                            ? 'border-teal-100 bg-teal-50/40 hover:border-teal-300 hover:bg-teal-50'
+                            : 'border-gray-100 bg-gray-50/50 hover:border-teal-200 hover:bg-white'
+                      } ${isToday(day) && !isActive ? 'ring-1 ring-teal-300' : ''}`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleSupportPaymentPaid(s.id, pay.id)}
-                        className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all ${
-                          pay.isPaid
-                            ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/30'
-                            : 'bg-white border border-gray-300 text-gray-400 hover:border-teal-400 hover:text-teal-600'
+                      <span
+                        className={`text-xs font-bold mb-1 w-6 h-6 flex items-center justify-center rounded-lg ${
+                          isToday(day) ? 'bg-teal-600 text-white' : 'text-gray-700'
                         }`}
-                        title={pay.isPaid ? 'Оплачено' : 'Отметить оплату'}
                       >
-                        <CheckCircle className="w-5 h-5" />
-                      </button>
-                      <input
-                        type="date"
-                        defaultValue={pay.dueDate.slice(0, 10)}
-                        key={pay.id + pay.dueDate}
-                        onBlur={(e) => {
-                          if (e.target.value && e.target.value !== pay.dueDate.slice(0, 10)) {
-                            updateSupportPayment(s.id, pay.id, { dueDate: e.target.value });
-                          }
-                        }}
-                        className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:border-teal-500"
-                      />
-                      <input
-                        type="text"
-                        defaultValue={pay.amount ? pay.amount.toLocaleString('ru-RU') : ''}
-                        key={pay.id + '-amt-' + pay.amount}
-                        onBlur={(e) => {
-                          const raw = parseFloat(e.target.value.replace(/\s/g, '')) || 0;
-                          if (raw !== pay.amount) updateSupportPayment(s.id, pay.id, { amount: raw });
-                        }}
-                        className="w-28 bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:border-teal-500 tabular-nums"
-                      />
-                      <span className="text-gray-400 text-sm font-bold">₽</span>
-                      <input
-                        type="text"
-                        defaultValue={pay.label}
-                        key={pay.id + pay.label}
-                        onBlur={(e) => {
-                          const v = e.target.value.trim();
-                          if (v !== pay.label) updateSupportPayment(s.id, pay.id, { label: v });
-                        }}
-                        className="flex-1 min-w-[120px] bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:border-teal-500"
-                      />
-                      {pay.isPaid && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-black uppercase text-emerald-600 tracking-wider">Оплачено</span>
-                          <input
-                            type="date"
-                            value={pay.paidAt?.slice(0, 10) || new Date().toISOString().slice(0, 10)}
-                            onChange={(e) =>
-                              updateSupportPayment(s.id, pay.id, { paidAt: e.target.value })
-                            }
-                            className="bg-white border border-emerald-200 rounded-xl px-3 py-2 text-sm font-medium outline-none focus:border-emerald-500"
+                        {format(day, 'd')}
+                      </span>
+                      <div className="flex flex-wrap gap-0.5 mt-auto">
+                        {dayEvents.slice(0, 4).map(ev => (
+                          <span
+                            key={ev.id}
+                            className={`w-1.5 h-1.5 rounded-full ${
+                              ev.type === 'payment'
+                                ? ev.isPaid
+                                  ? 'bg-emerald-500'
+                                  : 'bg-amber-400'
+                                : ev.type === 'act'
+                                  ? 'bg-blue-500'
+                                  : 'bg-gray-400'
+                            }`}
                           />
-                        </div>
-                      )}
+                        ))}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap gap-4 mb-6 text-[10px] font-bold uppercase tracking-wider text-gray-500">
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-teal-200 border border-teal-300" /> Срок договора</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" /> Оплачено</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-400" /> Ожидает оплаты</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-blue-500" /> Акт</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-gray-400" /> Комментарий</span>
+              </div>
+
+              {supCalActiveDate ? (
+                <div className="border border-teal-100 bg-gradient-to-br from-teal-50/80 to-white rounded-2xl p-6">
+                  <div className="flex flex-wrap items-center justify-between gap-4 mb-5">
+                    <h4 className="font-black text-[#0F172A]">
+                      {format(parseISO(supCalActiveDate), 'd MMMM yyyy', { locale: ru })}
+                    </h4>
+                    <button
+                      type="button"
+                      onClick={() => setSupCalActiveDate(null)}
+                      className="text-xs font-bold text-gray-400 hover:text-gray-600"
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                    <button
+                      type="button"
+                      onClick={() => openSupportEventModal('act', supCalActiveDate)}
+                      className="flex items-center gap-3 p-4 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-left transition-all"
+                    >
+                      <FileCheck className="w-5 h-5 text-blue-600 shrink-0" />
+                      <span className="text-sm font-bold text-blue-800">Акт по техподдержке</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openSupportEventModal('payment', supCalActiveDate, s.price)}
+                      className="flex items-center gap-3 p-4 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-left transition-all"
+                    >
+                      <Wallet className="w-5 h-5 text-emerald-600 shrink-0" />
+                      <span className="text-sm font-bold text-emerald-800">Оплата контрагента</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openSupportEventModal('comment', supCalActiveDate)}
+                      className="flex items-center gap-3 p-4 rounded-xl border border-gray-200 bg-gray-50 hover:bg-gray-100 text-left transition-all"
+                    >
+                      <MessageSquare className="w-5 h-5 text-gray-600 shrink-0" />
+                      <span className="text-sm font-bold text-gray-800">Комментарий</span>
+                    </button>
+                  </div>
+
+                  {activeDayEvents.length === 0 ? (
+                    <p className="text-sm text-gray-400 text-center py-4">На эту дату записей пока нет</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {[...activeDayEvents]
+                        .sort((a, b) => a.type.localeCompare(b.type))
+                        .map(ev => {
+                          const meta = SUPPORT_EVENT_META[ev.type];
+                          return (
+                            <div
+                              key={ev.id}
+                              className={`flex flex-wrap items-start gap-3 p-4 rounded-xl border ${meta.bg} ${meta.border}`}
+                            >
+                              {ev.type === 'payment' && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleSupportEventPaid(s.id, ev.id)}
+                                  className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center transition-all ${
+                                    ev.isPaid
+                                      ? 'bg-emerald-500 text-white'
+                                      : 'bg-white border border-gray-300 text-gray-400 hover:border-emerald-400'
+                                  }`}
+                                  title={ev.isPaid ? 'Оплачено' : 'Отметить оплату'}
+                                >
+                                  <CheckCircle className="w-4 h-4" />
+                                </button>
+                              )}
+                              {ev.type === 'act' && (
+                                <FileCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                              )}
+                              {ev.type === 'comment' && (
+                                <MessageSquare className="w-5 h-5 text-gray-500 shrink-0 mt-0.5" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <div className={`text-[10px] font-black uppercase tracking-wider mb-1 ${meta.color}`}>
+                                  {meta.label}
+                                </div>
+                                {ev.title && (
+                                  <div className="font-bold text-sm text-[#0F172A]">{ev.title}</div>
+                                )}
+                                {ev.type === 'payment' && (
+                                  <div className="text-sm font-bold text-emerald-700 tabular-nums mt-1">
+                                    {(ev.amount || 0).toLocaleString('ru-RU')} ₽
+                                    {ev.isPaid && ev.paidAt && (
+                                      <span className="text-emerald-600 font-semibold ml-2 text-xs">
+                                        ✓ {format(parseISO(ev.paidAt), 'd.MM.yyyy')}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                {ev.text && (
+                                  <p className="text-sm text-gray-600 mt-1 whitespace-pre-wrap">{ev.text}</p>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeSupportCalendarEvent(s.id, ev.id)}
+                                className="p-2 text-gray-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
+                                title="Удалить"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400 text-center py-6 border-2 border-dashed border-gray-200 rounded-2xl">
+                  Выберите дату на календаре выше
+                </p>
+              )}
+
+              {supEventModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+                  <div className="bg-white rounded-[2rem] p-8 max-w-md w-full shadow-2xl border border-gray-100">
+                    <h3 className="text-lg font-black text-[#0F172A] mb-1">
+                      {SUPPORT_EVENT_META[supEventModal.type].label}
+                    </h3>
+                    <p className="text-sm text-gray-500 mb-6">
+                      {format(parseISO(supEventModal.date), 'd MMMM yyyy', { locale: ru })}
+                    </p>
+                    {supEventModal.type !== 'comment' && (
+                      <div className="mb-4">
+                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">
+                          {supEventModal.type === 'act' ? 'Название акта' : 'Назначение'}
+                        </label>
+                        <input
+                          type="text"
+                          value={supEventTitle}
+                          onChange={(e) => setSupEventTitle(e.target.value)}
+                          className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                        />
+                      </div>
+                    )}
+                    {supEventModal.type === 'payment' && (
+                      <div className="mb-6">
+                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">
+                          Сумма (₽)
+                        </label>
+                        <input
+                          type="text"
+                          value={supEventAmount}
+                          onChange={(e) => setSupEventAmount(formatNumber(e.target.value))}
+                          className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                        />
+                      </div>
+                    )}
+                    {(supEventModal.type === 'comment' || supEventModal.type === 'act') && (
+                      <div className="mb-6">
+                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">
+                          {supEventModal.type === 'comment' ? 'Текст комментария' : 'Примечание (необязательно)'}
+                        </label>
+                        <textarea
+                          value={supEventText}
+                          onChange={(e) => setSupEventText(e.target.value)}
+                          rows={3}
+                          className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium resize-y"
+                          autoFocus={supEventModal.type === 'comment'}
+                        />
+                      </div>
+                    )}
+                    <div className="flex gap-3">
                       <button
                         type="button"
-                        onClick={() => removeSupportPayment(s.id, pay.id)}
-                        className="ml-auto p-2 text-gray-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
-                        title="Удалить из графика"
+                        onClick={() => setSupEventModal(null)}
+                        className="flex-1 py-3 rounded-xl font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-all"
                       >
-                        <Trash2 className="w-4 h-4" />
+                        Отмена
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => submitSupportEventModal(s.id)}
+                        className="flex-1 py-3 rounded-xl font-bold text-white bg-teal-600 hover:bg-teal-700 transition-all"
+                      >
+                        Добавить
                       </button>
                     </div>
-                  ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -2767,12 +3163,31 @@ function App() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Цена (₽)</label>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Цена (₽) / мес.</label>
                   <input
                     type="text"
                     value={supPrice}
                     onChange={(e) => setSupPrice(formatNumber(e.target.value))}
                     placeholder="0"
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Срок (мес.)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={supDurationMonths}
+                    onChange={(e) => setSupDurationMonths(e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-3 ml-1">Начало договора</label>
+                  <input
+                    type="date"
+                    value={supStartDate}
+                    onChange={(e) => setSupStartDate(e.target.value)}
                     className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
                   />
                 </div>
@@ -2826,8 +3241,12 @@ function App() {
                 </div>
               ) : (
                 filteredSupportRecords.map((item) => {
-                  const paidCount = item.paymentSchedule.filter(p => p.isPaid).length;
-                  const totalPayments = item.paymentSchedule.length;
+                  const paymentEv = item.calendarEvents.filter(e => e.type === 'payment');
+                  const paidCount = paymentEv.filter(p => p.isPaid).length;
+                  const totalPayments = paymentEv.length;
+                  const monthsLabel = item.contractDurationMonths
+                    ? `${item.contractDurationMonths} мес.`
+                    : null;
                   return (
                     <div
                       key={item.id}
@@ -2872,7 +3291,12 @@ function App() {
                         </div>
                         <div className="flex items-center gap-2 text-gray-600">
                           <Wallet className="w-4 h-4 text-emerald-500 shrink-0" />
-                          <span className="font-bold">{item.price.toLocaleString('ru-RU')} ₽</span>
+                          <span className="font-bold">
+                            {item.price.toLocaleString('ru-RU')} ₽
+                            {monthsLabel && (
+                              <span className="text-gray-400 font-semibold ml-1">/ {monthsLabel}</span>
+                            )}
+                          </span>
                         </div>
                         {totalPayments > 0 && (
                           <div className="flex items-center gap-2 text-gray-600">
