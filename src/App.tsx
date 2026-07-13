@@ -21,6 +21,13 @@ import {
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { loadKeyFromStorage, persistKey, flushCloudSnapshot, isCloudSyncEnabled, isElectron } from './lib/crmStorage';
+import { downloadSupportActDocx } from './lib/generateSupportActDocx';
+import {
+  normalizeSupportAct,
+  normalizeSupportActHourRow,
+  sumActHours,
+} from './lib/supportActTypes';
+import type { SupportAct, SupportActHourRow } from './lib/supportActTypes';
 
 interface Stage {
   id: string;
@@ -141,7 +148,12 @@ interface SupportRecord {
   /** Описание: что входит в сопровождение */
   description: string;
   comment: string;
+  /** Ежемесячная стоимость */
   price: number;
+  /** Общая стоимость договора */
+  totalPrice: number;
+  /** Номер договора, напр. 077 */
+  contractNumber: string;
   counterpartyName: string;
   /** Реквизиты контрагента */
   counterpartyDetails: string;
@@ -150,6 +162,7 @@ interface SupportRecord {
   /** Дата начала договора (yyyy-MM-dd) */
   contractStartDate: string;
   calendarEvents: SupportCalendarEvent[];
+  acts: SupportAct[];
   /** @deprecated — мигрируется в calendarEvents */
   paymentSchedule?: SupportPaymentEntry[];
   contract?: SupportContractFile;
@@ -232,20 +245,29 @@ function normalizeSupportRecord(raw: Partial<SupportRecord>): SupportRecord {
   ) {
     calendarEvents = migratePaymentScheduleToEvents(raw.paymentSchedule);
   }
+  const price = typeof raw.price === 'number' && !Number.isNaN(raw.price) ? raw.price : 0;
+  const months =
+    typeof raw.contractDurationMonths === 'number' && !Number.isNaN(raw.contractDurationMonths)
+      ? Math.max(0, Math.round(raw.contractDurationMonths))
+      : 0;
+  const totalPrice =
+    typeof raw.totalPrice === 'number' && !Number.isNaN(raw.totalPrice)
+      ? raw.totalPrice
+      : price * (months || 0);
   return {
     id: raw.id || crypto.randomUUID(),
     title: raw.title || '',
     description: raw.description || '',
     comment: raw.comment || '',
-    price: typeof raw.price === 'number' && !Number.isNaN(raw.price) ? raw.price : 0,
+    price,
+    totalPrice,
+    contractNumber: raw.contractNumber || '',
     counterpartyName: raw.counterpartyName || '',
     counterpartyDetails: raw.counterpartyDetails || '',
-    contractDurationMonths:
-      typeof raw.contractDurationMonths === 'number' && !Number.isNaN(raw.contractDurationMonths)
-        ? Math.max(0, Math.round(raw.contractDurationMonths))
-        : 0,
+    contractDurationMonths: months,
     contractStartDate: (raw.contractStartDate || '').slice(0, 10),
     calendarEvents,
+    acts: Array.isArray(raw.acts) ? raw.acts.map(normalizeSupportAct) : [],
     contract: raw.contract?.dataUrl ? raw.contract : undefined,
     createdAt: raw.createdAt || new Date().toISOString(),
     updatedAt: raw.updatedAt || new Date().toISOString(),
@@ -434,6 +456,9 @@ function App() {
   const [supCounterpartyDetails, setSupCounterpartyDetails] = useState('');
   const [supDurationMonths, setSupDurationMonths] = useState('12');
   const [supStartDate, setSupStartDate] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const [supContractNumber, setSupContractNumber] = useState('');
+  const [supTotalPrice, setSupTotalPrice] = useState('');
+  const [supTotalPriceManual, setSupTotalPriceManual] = useState(false);
   const [supCalViewMonth, setSupCalViewMonth] = useState(() => startOfMonth(new Date()));
   const [supCalActiveDate, setSupCalActiveDate] = useState<string | null>(null);
   const [supEventModal, setSupEventModal] = useState<{ type: SupportEventType; date: string } | null>(null);
@@ -441,6 +466,17 @@ function App() {
   const [supEventText, setSupEventText] = useState('');
   const [supEventTitle, setSupEventTitle] = useState('');
   const [isAddingSupport, setIsAddingSupport] = useState(false);
+  const [actEditorOpen, setActEditorOpen] = useState(false);
+  const [editingActId, setEditingActId] = useState<string | null>(null);
+  const [actNumber, setActNumber] = useState('');
+  const [actPeriodFrom, setActPeriodFrom] = useState('');
+  const [actPeriodTo, setActPeriodTo] = useState('');
+  const [actPeriodLabel, setActPeriodLabel] = useState('');
+  const [actHoursLimit, setActHoursLimit] = useState('20');
+  const [actOvertimeRate, setActOvertimeRate] = useState('1 000');
+  const [actSupportAmount, setActSupportAmount] = useState('');
+  const [actHourRows, setActHourRows] = useState<SupportActHourRow[]>([]);
+  const [actDownloadingId, setActDownloadingId] = useState<string | null>(null);
   const [wpTitle, setWpTitle] = useState('');
   const [wpPrice, setWpPrice] = useState('');
   const [wpCustomer, setWpCustomer] = useState('');
@@ -847,6 +883,8 @@ function App() {
     setSupEventAmount('');
     setSupEventText('');
     setSupEventTitle('');
+    setActEditorOpen(false);
+    setEditingActId(null);
   }, [selectedSupport?.id]);
 
   const addSupportRecord = (e: React.FormEvent) => {
@@ -854,17 +892,24 @@ function App() {
     if (!supTitle.trim()) return;
     const ts = new Date().toISOString();
     const months = Math.max(0, parseInt(supDurationMonths, 10) || 0);
+    const monthly = parseFloat(supPrice.replace(/\s/g, '')) || 0;
+    const total =
+      parseFloat(supTotalPrice.replace(/\s/g, '')) ||
+      monthly * months;
     const record: SupportRecord = {
       id: crypto.randomUUID(),
       title: supTitle.trim(),
       description: supDescription.trim(),
       comment: supComment.trim(),
-      price: parseFloat(supPrice.replace(/\s/g, '')) || 0,
+      price: monthly,
+      totalPrice: total,
+      contractNumber: supContractNumber.trim(),
       counterpartyName: supCounterpartyName.trim(),
       counterpartyDetails: supCounterpartyDetails.trim(),
       contractDurationMonths: months,
       contractStartDate: supStartDate || format(new Date(), 'yyyy-MM-dd'),
       calendarEvents: [],
+      acts: [],
       createdAt: ts,
       updatedAt: ts,
     };
@@ -876,6 +921,9 @@ function App() {
     setSupDescription('');
     setSupComment('');
     setSupPrice('');
+    setSupTotalPrice('');
+    setSupTotalPriceManual(false);
+    setSupContractNumber('');
     setSupCounterpartyName('');
     setSupCounterpartyDetails('');
     setSupDurationMonths('12');
@@ -1003,12 +1051,15 @@ function App() {
   };
 
   const openSupportEventModal = (type: SupportEventType, date: string, defaultAmount?: number) => {
+    if (type === 'act') {
+      const rec = selectedSupport;
+      if (rec) openActEditor(rec, undefined, date);
+      return;
+    }
     setSupEventModal({ type, date });
     setSupEventAmount(defaultAmount ? formatNumber(String(defaultAmount)) : '');
     setSupEventText('');
-    setSupEventTitle(
-      type === 'act' ? 'Акт по техподдержке' : type === 'payment' ? 'Оплата контрагента' : ''
-    );
+    setSupEventTitle(type === 'payment' ? 'Оплата контрагента' : '');
   };
 
   const submitSupportEventModal = (supportId: string) => {
@@ -1025,6 +1076,151 @@ function App() {
     setSupEventAmount('');
     setSupEventText('');
     setSupEventTitle('');
+  };
+
+  const buildPeriodLabel = (from: string, to: string) => {
+    try {
+      if (!from || !to) return '';
+      const a = parseISO(from);
+      const b = parseISO(to);
+      if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return '';
+      const left = format(a, 'LLLL', { locale: ru });
+      const right = format(b, 'LLLL yyyy', { locale: ru });
+      if (format(a, 'yyyy-MM') === format(b, 'yyyy-MM')) {
+        return format(a, 'LLLL yyyy', { locale: ru });
+      }
+      return `${left}–${right}`;
+    } catch {
+      return '';
+    }
+  };
+
+  const openActEditor = (
+    rec: SupportRecord,
+    existing?: SupportAct,
+    seedDate?: string
+  ) => {
+    if (existing) {
+      setEditingActId(existing.id);
+      setActNumber(existing.actNumber);
+      setActPeriodFrom(existing.periodFrom);
+      setActPeriodTo(existing.periodTo);
+      setActPeriodLabel(existing.periodLabel);
+      setActHoursLimit(String(existing.hoursLimit));
+      setActOvertimeRate(formatNumber(String(existing.overtimeRate)));
+      setActSupportAmount(formatNumber(String(existing.supportAmount)));
+      setActHourRows(existing.hourRows.length ? existing.hourRows.map(normalizeSupportActHourRow) : []);
+    } else {
+      const nextIdx = (rec.acts?.length || 0) + 1;
+      const base = seedDate || format(new Date(), 'yyyy-MM-dd');
+      let from = base;
+      let to = base;
+      try {
+        const d = parseISO(base);
+        from = format(startOfMonth(d), 'yyyy-MM-dd');
+        to = format(endOfMonth(d), 'yyyy-MM-dd');
+      } catch {
+        /* keep base */
+      }
+      setEditingActId(null);
+      setActNumber(rec.contractNumber ? `${rec.contractNumber}-${nextIdx}` : String(nextIdx));
+      setActPeriodFrom(from);
+      setActPeriodTo(to);
+      setActPeriodLabel(buildPeriodLabel(from, to));
+      setActHoursLimit('20');
+      setActOvertimeRate('1 000');
+      setActSupportAmount(formatNumber(String(rec.price || 0)));
+      setActHourRows([
+        normalizeSupportActHourRow({
+          id: crypto.randomUUID(),
+          date: seedDate || from,
+          task: '',
+          hours: 0,
+          packageType: 'package',
+        }),
+      ]);
+    }
+    setActEditorOpen(true);
+  };
+
+  const closeActEditor = () => {
+    setActEditorOpen(false);
+    setEditingActId(null);
+  };
+
+  const saveSupportAct = (supportId: string) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    const ts = new Date().toISOString();
+    const draft = normalizeSupportAct({
+      id: editingActId || crypto.randomUUID(),
+      actNumber: actNumber.trim() || '1',
+      periodFrom: actPeriodFrom,
+      periodTo: actPeriodTo,
+      periodLabel: actPeriodLabel.trim() || buildPeriodLabel(actPeriodFrom, actPeriodTo),
+      hoursLimit: parseInt(actHoursLimit, 10) || 20,
+      overtimeRate: parseFloat(actOvertimeRate.replace(/\s/g, '')) || 0,
+      supportAmount: parseFloat(actSupportAmount.replace(/\s/g, '')) || 0,
+      hourRows: actHourRows.map(normalizeSupportActHourRow),
+      createdAt: editingActId
+        ? rec.acts.find(a => a.id === editingActId)?.createdAt || ts
+        : ts,
+      updatedAt: ts,
+    });
+
+    const acts = editingActId
+      ? rec.acts.map(a => (a.id === editingActId ? draft : a))
+      : [...rec.acts, draft];
+
+    // Mark calendar on period start if creating new act
+    let calendarEvents = rec.calendarEvents;
+    if (!editingActId && draft.periodFrom) {
+      const hasMarker = calendarEvents.some(
+        e => e.type === 'act' && e.date.slice(0, 10) === draft.periodFrom.slice(0, 10)
+      );
+      if (!hasMarker) {
+        calendarEvents = [
+          ...calendarEvents,
+          normalizeCalendarEvent({
+            id: crypto.randomUUID(),
+            date: draft.periodFrom,
+            type: 'act',
+            title: `Акт ${draft.actNumber}`,
+            text: draft.periodLabel,
+          }),
+        ];
+      }
+    }
+
+    patchSupportRecord(supportId, { acts, calendarEvents });
+    addLog('Сопровождение', editingActId ? `Обновлён акт ${draft.actNumber}` : `Создан акт ${draft.actNumber}`);
+    closeActEditor();
+  };
+
+  const deleteSupportAct = (supportId: string, actId: string) => {
+    const rec = supportRecords.find(r => r.id === supportId);
+    if (!rec) return;
+    const act = rec.acts.find(a => a.id === actId);
+    patchSupportRecord(supportId, { acts: rec.acts.filter(a => a.id !== actId) });
+    addLog('Сопровождение', `Удалён акт ${act?.actNumber ?? actId}`);
+  };
+
+  const downloadAct = async (rec: SupportRecord, act: SupportAct) => {
+    try {
+      setActDownloadingId(act.id);
+      await downloadSupportActDocx({
+        contractNumber: rec.contractNumber,
+        contractStartDate: rec.contractStartDate,
+        counterpartyName: rec.counterpartyName,
+        counterpartyDetails: rec.counterpartyDetails,
+        act,
+      });
+    } catch (err) {
+      console.error(err);
+      alert('Не удалось сформировать DOCX');
+    } finally {
+      setActDownloadingId(null);
+    }
   };
 
   const uploadSupportContract = async (supportId: string, file: File) => {
@@ -1470,8 +1666,15 @@ function App() {
                   <p className="text-gray-500 text-sm mt-1">Изменения сохраняются автоматически.</p>
                 </div>
                 <div className="text-right">
-                  <div className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-400 mb-1">Стоимость</div>
-                  <div className="text-2xl font-black text-teal-700 tabular-nums">{s.price.toLocaleString('ru-RU')} ₽</div>
+                  <div className="text-[10px] font-black uppercase tracking-[0.2em] text-gray-400 mb-1">
+                    {s.contractNumber ? `Договор № ${s.contractNumber}` : 'Стоимость'}
+                  </div>
+                  <div className="text-2xl font-black text-teal-700 tabular-nums">{s.price.toLocaleString('ru-RU')} ₽/мес.</div>
+                  {s.totalPrice > 0 && (
+                    <div className="text-sm font-semibold text-gray-500 mt-1">
+                      Итого {s.totalPrice.toLocaleString('ru-RU')} ₽
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1503,14 +1706,47 @@ function App() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Цена (₽)</label>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Цена (₽) / мес.</label>
                   <input
                     type="text"
                     defaultValue={s.price ? s.price.toLocaleString('ru-RU') : ''}
                     key={s.id + '-price-' + s.price}
                     onBlur={(e) => {
                       const raw = parseFloat(e.target.value.replace(/\s/g, '')) || 0;
-                      if (raw !== s.price) patchSupportRecord(s.id, { price: raw });
+                      if (raw !== s.price) {
+                        const patch: Partial<SupportRecord> = { price: raw };
+                        if (!s.totalPrice || s.totalPrice === s.price * s.contractDurationMonths) {
+                          patch.totalPrice = raw * (s.contractDurationMonths || 0);
+                        }
+                        patchSupportRecord(s.id, patch);
+                      }
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Общая стоимость (₽)</label>
+                  <input
+                    type="text"
+                    defaultValue={s.totalPrice ? s.totalPrice.toLocaleString('ru-RU') : ''}
+                    key={s.id + '-total-' + s.totalPrice}
+                    onBlur={(e) => {
+                      const raw = parseFloat(e.target.value.replace(/\s/g, '')) || 0;
+                      if (raw !== s.totalPrice) patchSupportRecord(s.id, { totalPrice: raw });
+                    }}
+                    className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Номер договора</label>
+                  <input
+                    type="text"
+                    defaultValue={s.contractNumber}
+                    key={s.id + '-num-' + s.contractNumber}
+                    placeholder="077"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v !== s.contractNumber) patchSupportRecord(s.id, { contractNumber: v });
                     }}
                     className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
                   />
@@ -1524,7 +1760,13 @@ function App() {
                     key={s.id + '-months-' + s.contractDurationMonths}
                     onBlur={(e) => {
                       const v = Math.max(0, parseInt(e.target.value, 10) || 0);
-                      if (v !== s.contractDurationMonths) patchSupportRecord(s.id, { contractDurationMonths: v });
+                      if (v !== s.contractDurationMonths) {
+                        const patch: Partial<SupportRecord> = { contractDurationMonths: v };
+                        if (!s.totalPrice || s.totalPrice === s.price * s.contractDurationMonths) {
+                          patch.totalPrice = s.price * v;
+                        }
+                        patchSupportRecord(s.id, patch);
+                      }
                     }}
                     className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
                   />
@@ -1946,6 +2188,88 @@ function App() {
             </div>
 
             <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-gray-200/50 border border-gray-100">
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+                <div>
+                  <h2 className="text-lg font-black text-[#0F172A] flex items-center gap-2">
+                    <FileCheck className="w-5 h-5 text-teal-600" /> Акты по договору
+                  </h2>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Отчёт по часам и акт оказанных услуг — скачивание в DOCX.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openActEditor(s)}
+                  className="inline-flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white font-bold px-5 py-3 rounded-2xl shadow-lg shadow-teal-500/25 transition-all text-sm"
+                >
+                  <Plus className="w-4 h-4" /> Создать акт
+                </button>
+              </div>
+
+              {s.acts.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-10 border-2 border-dashed border-gray-200 rounded-2xl">
+                  Актов пока нет — создайте первый или нажмите «Акт» на дате в календаре
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {[...s.acts]
+                    .sort((a, b) => (a.periodFrom || '').localeCompare(b.periodFrom || ''))
+                    .map(act => {
+                      const { packageHours, overlimitHours } = sumActHours(act);
+                      return (
+                        <div
+                          key={act.id}
+                          className="flex flex-wrap items-center gap-4 p-5 rounded-2xl border border-teal-100 bg-gradient-to-br from-teal-50/50 to-white"
+                        >
+                          <span className="w-12 h-12 rounded-2xl bg-teal-600 text-white flex items-center justify-center shadow-md shadow-teal-500/30 shrink-0">
+                            <FileCheck className="w-6 h-6" />
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-black text-[#0F172A]">
+                              Акт № {act.actNumber || '—'}
+                            </div>
+                            <div className="text-sm text-gray-500 mt-0.5">
+                              {act.periodLabel || `${act.periodFrom} — ${act.periodTo}`}
+                              {' · '}
+                              {packageHours + overlimitHours} ч
+                              {' · '}
+                              <span className="font-bold text-teal-700">
+                                {act.supportAmount.toLocaleString('ru-RU')} ₽
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => openActEditor(s, act)}
+                            className="px-4 py-2 rounded-xl text-sm font-bold text-gray-600 bg-white border border-gray-200 hover:border-teal-300 transition-all"
+                          >
+                            Изменить
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actDownloadingId === act.id}
+                            onClick={() => downloadAct(s, act)}
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-teal-700 bg-teal-50 border border-teal-200 hover:bg-teal-100 transition-all disabled:opacity-50"
+                          >
+                            <Download className="w-4 h-4" />
+                            {actDownloadingId === act.id ? '…' : 'DOCX'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteSupportAct(s.id, act.id)}
+                            className="p-2 text-gray-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
+                            title="Удалить акт"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-gray-200/50 border border-gray-100">
               <h2 className="text-lg font-black text-[#0F172A] mb-2">Договор</h2>
               <p className="text-sm text-gray-500 mb-6">PDF, DOC или DOCX до 4 МБ. Файл хранится локально / в облаке вместе с CRM.</p>
 
@@ -2016,6 +2340,214 @@ function App() {
               </button>
             </div>
           </div>
+
+          {actEditorOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+              <div className="bg-white rounded-[2rem] p-8 max-w-3xl w-full max-h-[92vh] overflow-y-auto shadow-2xl border border-gray-100">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h2 className="text-xl font-black text-[#0F172A]">
+                      {editingActId ? 'Редактирование акта' : 'Новый акт'}
+                    </h2>
+                    <p className="text-sm text-gray-500 mt-1">Отчёт по часам + акт услуг по поддержке</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeActEditor}
+                    className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Номер акта</label>
+                    <input
+                      type="text"
+                      value={actNumber}
+                      onChange={(e) => setActNumber(e.target.value)}
+                      placeholder="077-1"
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Период (подпись)</label>
+                    <input
+                      type="text"
+                      value={actPeriodLabel}
+                      onChange={(e) => setActPeriodLabel(e.target.value)}
+                      placeholder="май–июнь 2026"
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Период с</label>
+                    <input
+                      type="date"
+                      value={actPeriodFrom}
+                      onChange={(e) => {
+                        setActPeriodFrom(e.target.value);
+                        setActPeriodLabel(buildPeriodLabel(e.target.value, actPeriodTo));
+                      }}
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Период по</label>
+                    <input
+                      type="date"
+                      value={actPeriodTo}
+                      onChange={(e) => {
+                        setActPeriodTo(e.target.value);
+                        setActPeriodLabel(buildPeriodLabel(actPeriodFrom, e.target.value));
+                      }}
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Лимит часов пакета</label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={actHoursLimit}
+                      onChange={(e) => setActHoursLimit(e.target.value)}
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">Ставка сверхлимита (₽/ч)</label>
+                    <input
+                      type="text"
+                      value={actOvertimeRate}
+                      onChange={(e) => setActOvertimeRate(formatNumber(e.target.value))}
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-2">К оплате за поддержку (₽)</label>
+                    <input
+                      type="text"
+                      value={actSupportAmount}
+                      onChange={(e) => setActSupportAmount(formatNumber(e.target.value))}
+                      className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 outline-none focus:border-teal-500 font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div className="mb-4 flex items-center justify-between">
+                  <h3 className="font-black text-[#0F172A]">Оказанные услуги (часы)</h3>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActHourRows(prev => [
+                        ...prev,
+                        normalizeSupportActHourRow({
+                          id: crypto.randomUUID(),
+                          date: actPeriodFrom || format(new Date(), 'yyyy-MM-dd'),
+                          task: '',
+                          hours: 0,
+                          packageType: 'package',
+                        }),
+                      ])
+                    }
+                    className="text-sm font-bold text-teal-700 hover:underline"
+                  >
+                    + Строка
+                  </button>
+                </div>
+
+                <div className="space-y-3 mb-6">
+                  {actHourRows.map((row, idx) => (
+                    <div
+                      key={row.id}
+                      className="grid grid-cols-1 md:grid-cols-12 gap-2 p-3 rounded-xl bg-gray-50 border border-gray-100"
+                    >
+                      <input
+                        type="date"
+                        value={row.date}
+                        onChange={(e) =>
+                          setActHourRows(prev =>
+                            prev.map((r, i) => (i === idx ? { ...r, date: e.target.value } : r))
+                          )
+                        }
+                        className="md:col-span-3 bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-teal-500"
+                      />
+                      <input
+                        type="text"
+                        value={row.task}
+                        onChange={(e) =>
+                          setActHourRows(prev =>
+                            prev.map((r, i) => (i === idx ? { ...r, task: e.target.value } : r))
+                          )
+                        }
+                        placeholder="Задача / услуга"
+                        className="md:col-span-4 bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-teal-500"
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={row.hours || ''}
+                        onChange={(e) =>
+                          setActHourRows(prev =>
+                            prev.map((r, i) =>
+                              i === idx ? { ...r, hours: parseFloat(e.target.value) || 0 } : r
+                            )
+                          )
+                        }
+                        placeholder="Часы"
+                        className="md:col-span-2 bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-teal-500"
+                      />
+                      <select
+                        value={row.packageType}
+                        onChange={(e) =>
+                          setActHourRows(prev =>
+                            prev.map((r, i) =>
+                              i === idx
+                                ? {
+                                    ...r,
+                                    packageType: e.target.value === 'overlimit' ? 'overlimit' : 'package',
+                                  }
+                                : r
+                            )
+                          )
+                        }
+                        className="md:col-span-2 bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-teal-500"
+                      >
+                        <option value="package">Пакет</option>
+                        <option value="overlimit">Сверхлимит</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => setActHourRows(prev => prev.filter((_, i) => i !== idx))}
+                        className="md:col-span-1 p-2 text-gray-400 hover:text-rose-500 rounded-lg"
+                      >
+                        <Trash2 className="w-4 h-4 mx-auto" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={closeActEditor}
+                    className="flex-1 py-3.5 rounded-2xl font-bold text-gray-600 bg-gray-100 hover:bg-gray-200"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => saveSupportAct(s.id)}
+                    className="flex-1 py-3.5 rounded-2xl font-bold text-white bg-teal-600 hover:bg-teal-700 shadow-lg shadow-teal-500/25"
+                  >
+                    Сохранить акт
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </main>
       </div>
     );
@@ -3197,7 +3729,7 @@ function App() {
                 <div className="rounded-[1.5rem] border border-teal-100 bg-gradient-to-br from-teal-50 to-white px-8 py-5 shadow-lg shadow-teal-100/60">
                   <div className="text-[10px] font-black uppercase tracking-[0.2em] text-teal-500/80 mb-1">Сумма всех договоров</div>
                   <div className="text-3xl font-black text-teal-700 tabular-nums">
-                    {supportRecords.reduce((sum, r) => sum + (Number(r.price) || 0), 0).toLocaleString('ru-RU')} ₽
+                    {supportRecords.reduce((sum, r) => sum + (Number(r.totalPrice) || Number(r.price) || 0), 0).toLocaleString('ru-RU')} ₽
                   </div>
                   <div className="text-xs font-semibold text-gray-500 mt-1">
                     {(() => {
@@ -3296,6 +3828,18 @@ function App() {
                             )}
                           </span>
                         </div>
+                        {item.contractNumber && (
+                          <div className="flex items-center gap-2 text-gray-600">
+                            <FileText className="w-4 h-4 text-teal-500 shrink-0" />
+                            <span className="font-semibold">Договор № {item.contractNumber}</span>
+                          </div>
+                        )}
+                        {(item.acts?.length ?? 0) > 0 && (
+                          <div className="flex items-center gap-2 text-gray-600">
+                            <FileCheck className="w-4 h-4 text-blue-500 shrink-0" />
+                            <span className="font-medium">Актов: {item.acts.length}</span>
+                          </div>
+                        )}
                         {totalPayments > 0 && (
                           <div className="flex items-center gap-2 text-gray-600">
                             <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
@@ -3361,11 +3905,29 @@ function App() {
                       />
                     </div>
                     <div>
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Номер договора</label>
+                      <input
+                        type="text"
+                        value={supContractNumber}
+                        onChange={(e) => setSupContractNumber(e.target.value)}
+                        placeholder="077"
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                      />
+                    </div>
+                    <div>
                       <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Цена (₽) / мес.</label>
                       <input
                         type="text"
                         value={supPrice}
-                        onChange={(e) => setSupPrice(formatNumber(e.target.value))}
+                        onChange={(e) => {
+                          const v = formatNumber(e.target.value);
+                          setSupPrice(v);
+                          if (!supTotalPriceManual) {
+                            const m = parseFloat(v.replace(/\s/g, '')) || 0;
+                            const months = parseInt(supDurationMonths, 10) || 0;
+                            setSupTotalPrice(formatNumber(String(m * months)));
+                          }
+                        }}
                         placeholder="0"
                         className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
                       />
@@ -3376,7 +3938,27 @@ function App() {
                         type="number"
                         min={1}
                         value={supDurationMonths}
-                        onChange={(e) => setSupDurationMonths(e.target.value)}
+                        onChange={(e) => {
+                          setSupDurationMonths(e.target.value);
+                          if (!supTotalPriceManual) {
+                            const m = parseFloat(supPrice.replace(/\s/g, '')) || 0;
+                            const months = parseInt(e.target.value, 10) || 0;
+                            setSupTotalPrice(formatNumber(String(m * months)));
+                          }
+                        }}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-[0.15em] mb-2 ml-1">Общая стоимость (₽)</label>
+                      <input
+                        type="text"
+                        value={supTotalPrice}
+                        onChange={(e) => {
+                          setSupTotalPriceManual(true);
+                          setSupTotalPrice(formatNumber(e.target.value));
+                        }}
+                        placeholder="авто: цена × срок"
                         className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-5 py-3.5 outline-none focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 font-medium"
                       />
                     </div>
