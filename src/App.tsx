@@ -12,7 +12,7 @@ import {
   Phone, UserCircle,
   TrendingUp, Target, MessageSquare, Tag, Radio,
   FolderKanban, GripVertical, LifeBuoy, Download,
-  Calendar, ChevronLeft, FileCheck
+  Calendar, ChevronLeft, FileCheck, Megaphone,
 } from 'lucide-react';
 import {
   format, addDays, differenceInSeconds, isPast, differenceInHours,
@@ -74,6 +74,7 @@ interface Lead {
   siteType?: 'Vizitka' | 'Landing' | 'Store';
   notes: string;
   createdAt: string;
+  source?: string;
 }
 
 interface AppLog {
@@ -342,6 +343,7 @@ const TRAFFIC_SOURCES = [
   { key: 'vk',      label: 'ВК Реклама',        color: '#4C75A3', bg: '#EEF3FA', Icon: MessageSquare },
   { key: 'avito',   label: 'Авито',             color: '#00AEEF', bg: '#E0F7FD', Icon: Tag },
   { key: 'profi',   label: 'Профи.ру',          color: '#8B5CF6', bg: '#EDE9FE', Icon: Star },
+  { key: 'leadgen', label: 'Лидогенерация',     color: '#7C3AED', bg: '#F5F3FF', Icon: Megaphone },
   { key: 'word',    label: 'Сарафанное радио',  color: '#00B956', bg: '#E8F9F0', Icon: Radio },
 ] as const;
 
@@ -580,6 +582,29 @@ function App() {
   const persist = useCallback((key: string, data: any[]) => {
     persistKey(key, data);
   }, []);
+
+  const mergeIncomingLeads = useCallback(async () => {
+    const incoming = await loadKeyFromStorage('crm_incoming_leads_v1');
+    if (!Array.isArray(incoming) || incoming.length === 0) return;
+    setLeads(prev => {
+      const ids = new Set(prev.map(l => l.id));
+      const extra = incoming.filter((l: Lead) => l && typeof l.id === 'string' && !ids.has(l.id));
+      if (extra.length === 0) return prev;
+      const next = [...extra, ...prev];
+      persist('crm_leads_v2', next);
+      return next;
+    });
+    persist('crm_incoming_leads_v1', []);
+  }, [persist]);
+
+  useEffect(() => {
+    void mergeIncomingLeads();
+    if (!isCloudSyncEnabled()) return;
+    const timer = setInterval(() => {
+      void mergeIncomingLeads();
+    }, 20000);
+    return () => clearInterval(timer);
+  }, [mergeIncomingLeads]);
 
   const reorderWorkProjects = useCallback(
     (dragId: string, overId: string) => {
@@ -1316,7 +1341,7 @@ function App() {
       notes: newLead.notes || '',
       productType: newLead.productType,
       siteType: newLead.siteType,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     };
 
     const updated = [lead, ...leads];
@@ -4323,6 +4348,7 @@ function App() {
                           setSelectedLead(l);
                           setSelectedWorkProject(null);
                           setSelectedSupport(null);
+                          setSelectedSource(l.source || '');
                           setActiveTab('projects');
                         }}
                         className="p-2 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-xl transition-all"
@@ -4339,6 +4365,11 @@ function App() {
                     </div>
                   </div>
                   <h3 className="text-xl font-black text-[#0F172A] mb-1">{l.name}</h3>
+                  {l.source === 'leadgen' && (
+                    <div className="inline-flex items-center gap-1.5 mb-3 px-2.5 py-1 rounded-lg bg-violet-50 text-violet-700 text-[10px] font-black uppercase tracking-wider border border-violet-100">
+                      <Megaphone className="w-3 h-3" /> Лидогенерация
+                    </div>
+                  )}
                   <div className="flex items-center gap-2 text-gray-500 text-sm font-medium mb-4">
                     <Phone className="w-3.5 h-3.5" /> {displayPhone(l.phone)}
                   </div>
