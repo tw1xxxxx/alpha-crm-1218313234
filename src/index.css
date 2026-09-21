@@ -9,6 +9,14 @@
   background-color: #F8FAFC;
 }
 
+.workers-page {
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+.workers-page .font-mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
 body {
   margin: 0;
   -webkit-font-smoothing: antialiased;
