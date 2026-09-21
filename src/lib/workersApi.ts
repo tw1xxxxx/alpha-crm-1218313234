@@ -2,13 +2,14 @@ import { mockWorkerStats, mockWorkersLive } from './workersMock';
 import type { StatsPeriod, WorkerLive, WorkerStats } from './workersTypes';
 
 /**
- * Base URL for workers backend.
- * When ready, set VITE_WORKERS_API_URL (e.g. https://api.example.com)
- * and implement the real shapes in fetchWorkers / fetchWorkerStats.
+ * Base URL for workers API.
+ * Default: same-origin `/api/v1` (Vercel serverless).
+ * Override: VITE_WORKERS_API_URL=https://...
+ * Force demo: VITE_WORKERS_USE_MOCK=1
  */
-const API_BASE = (import.meta.env.VITE_WORKERS_API_URL as string | undefined)?.replace(/\/$/, '') ?? '';
-
-const USE_MOCK = !API_BASE;
+const ENV_BASE = (import.meta.env.VITE_WORKERS_API_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+const USE_MOCK = import.meta.env.VITE_WORKERS_USE_MOCK === '1';
+const API_BASE = ENV_BASE || '';
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -26,8 +27,8 @@ export async function fetchWorkers(): Promise<WorkerLive[]> {
     await delay(180);
     return mockWorkersLive();
   }
-  // Expected: GET /workers → WorkerLive[]
-  return getJson<WorkerLive[]>('/workers');
+  const data = await getJson<{ ok: boolean; agents: WorkerLive[] }>('/api/v1/agents');
+  return data.agents ?? [];
 }
 
 /** Stats for one worker and period */
@@ -36,8 +37,10 @@ export async function fetchWorkerStats(workerId: string, period: StatsPeriod): P
     await delay(220);
     return mockWorkerStats(workerId, period);
   }
-  // Expected: GET /workers/:id/stats?period=today|yesterday|3days|week|month
-  return getJson<WorkerStats>(`/workers/${encodeURIComponent(workerId)}/stats?period=${period}`);
+  const data = await getJson<WorkerStats & { ok: boolean }>(
+    `/api/v1/agents/${encodeURIComponent(workerId)}/stats?period=${period}`,
+  );
+  return data;
 }
 
 function delay(ms: number) {

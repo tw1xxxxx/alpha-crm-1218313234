@@ -18,6 +18,7 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
       postgres: true,
       syncSecretConfigured: !!process.env.CRM_SYNC_SECRET,
       leadWebhookConfigured: !!(process.env.CRM_LEAD_WEBHOOK_TOKEN || process.env.CRM_SYNC_SECRET),
+      agentsBootstrapConfigured: !!(process.env.AGENT_BOOTSTRAP_TOKEN || process.env.CRM_SYNC_SECRET),
     });
   } catch (error) {
     console.error('[api/health]', error);

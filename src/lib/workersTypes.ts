@@ -2,26 +2,44 @@ export type WorkerStatus = 'online' | 'idle' | 'offline' | 'warning';
 
 export type StatsPeriod = 'today' | 'yesterday' | '3days' | 'week' | 'month';
 
+export interface WorkerHw {
+  cpu?: string;
+  cores?: number;
+  ram_gb?: number;
+  gpu?: string;
+  gpu_count?: number;
+}
+
 export interface WorkerLive {
   id: string;
   name: string;
   host?: string;
+  hw?: WorkerHw;
   status: WorkerStatus;
   temperatureC: number;
+  /** Мощность под нашей нагрузкой (power × util%) */
   powerUsW: number;
+  /** Остальная мощность GPU */
   powerOthersW: number;
+  powerTotalW?: number;
+  hashrateMh?: number;
+  utilPct?: number;
+  running?: boolean;
+  sharesFound?: number;
+  sharesRejected?: number;
   lastSeenAt: string;
   uptimeSec?: number;
 }
 
 export interface StatsPoint {
-  /** ISO timestamp for the bucket start */
   at: string;
-  /** Label for chart axis (hour or day) */
   label: string;
   powerUsWh: number;
   powerOthersWh: number;
   avgTempC: number;
+  avgHashrateMh?: number;
+  avgUtilPct?: number;
+  samples?: number;
 }
 
 export interface WorkerStats {
@@ -34,6 +52,7 @@ export interface WorkerStats {
     powerOthersWh: number;
     avgTempC: number;
     maxTempC: number;
+    avgHashrateMh?: number;
   };
 }
 

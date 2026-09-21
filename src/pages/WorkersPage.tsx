@@ -27,12 +27,10 @@ function formatWh(wh: number) {
   return `${Math.round(wh)} Вт·ч`;
 }
 
-function formatUptime(sec?: number) {
-  if (!sec) return '—';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  if (h > 48) return `${Math.floor(h / 24)}д ${h % 24}ч`;
-  return `${h}ч ${m}м`;
+function formatHashrate(mh?: number) {
+  if (mh == null) return '—';
+  if (mh >= 1000) return `${(mh / 1000).toFixed(2)} GH/s`;
+  return `${mh.toFixed(1)} MH/s`;
 }
 
 function tempTone(t: number) {
@@ -210,25 +208,41 @@ function WorkerCard({
           <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-slate-500">
             <Gauge className="h-3.5 w-3.5" /> Чужие
           </div>
-          <p className="mt-1 font-mono text-xl font-semibold tabular-nums text-fuchsia-300/90">
+          <p className={`mt-1 font-mono text-xl font-semibold tabular-nums text-fuchsia-300/90`}>
             {worker.status === 'offline' ? '—' : formatWatts(worker.powerOthersW)}
           </p>
         </div>
       </div>
 
       {worker.status !== 'offline' && (
-        <div className="relative mt-4">
-          <div className="mb-1.5 flex justify-between text-[11px] text-slate-500">
-            <span>Доля мощности</span>
-            <span className="font-mono text-cyan-400/80">{Math.round(usPct)}% наши</span>
+        <>
+          <div className="relative mt-3 grid grid-cols-2 gap-3">
+            <div className="rounded-2xl bg-black/20 px-3 py-2 ring-1 ring-white/5">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Hashrate</p>
+              <p className="font-mono text-sm font-semibold text-emerald-300">{formatHashrate(worker.hashrateMh)}</p>
+            </div>
+            <div className="rounded-2xl bg-black/20 px-3 py-2 ring-1 ring-white/5">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Shares</p>
+              <p className="font-mono text-sm font-semibold text-slate-200">
+                {worker.sharesFound ?? 0}
+                <span className="text-slate-500"> / </span>
+                <span className="text-rose-400/80">{worker.sharesRejected ?? 0}</span>
+              </p>
+            </div>
           </div>
-          <div className="h-2 overflow-hidden rounded-full bg-white/5">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-teal-300"
-              style={{ width: `${usPct}%` }}
-            />
+          <div className="relative mt-4">
+            <div className="mb-1.5 flex justify-between text-[11px] text-slate-500">
+              <span>GPU util → наша доля</span>
+              <span className="font-mono text-cyan-400/80">{Math.round(worker.utilPct ?? usPct)}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-white/5">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-teal-300"
+                style={{ width: `${Math.min(100, worker.utilPct ?? usPct)}%` }}
+              />
+            </div>
           </div>
-        </div>
+        </>
       )}
     </button>
   );
@@ -295,18 +309,25 @@ function WorkerDetail({
               </div>
               <p className="mt-1 font-mono text-sm text-slate-500">{worker.id}</p>
               <p className="mt-2 text-sm text-slate-400">
-                Аптайм {formatUptime(worker.uptimeSec)} · обновлено{' '}
+                {worker.hw?.gpu ? `${worker.hw.gpu}` : 'GPU —'}
+                {worker.hw?.ram_gb != null ? ` · ${worker.hw.ram_gb} GB RAM` : ''}
+                {' · '}
+                обновлено{' '}
                 {new Date(worker.lastSeenAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
               </p>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
             <div className="rounded-2xl bg-black/40 px-3 py-3 ring-1 ring-white/5">
               <p className="text-[10px] uppercase tracking-wider text-slate-500">Temp</p>
               <p className={`font-mono text-lg font-semibold ${temp.text}`}>
                 {worker.temperatureC}°C
               </p>
+            </div>
+            <div className="rounded-2xl bg-black/40 px-3 py-3 ring-1 ring-white/5">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Hashrate</p>
+              <p className="font-mono text-lg font-semibold text-emerald-300">{formatHashrate(worker.hashrateMh)}</p>
             </div>
             <div className="rounded-2xl bg-black/40 px-3 py-3 ring-1 ring-white/5">
               <p className="text-[10px] uppercase tracking-wider text-slate-500">Наши</p>
@@ -377,8 +398,10 @@ function WorkerDetail({
                   <p className="mt-1 font-mono text-lg font-semibold text-amber-300">{stats.totals.avgTempC}°C</p>
                 </div>
                 <div className="rounded-2xl bg-white/[0.03] p-4">
-                  <p className="text-xs text-slate-500">Макс. t°</p>
-                  <p className="mt-1 font-mono text-lg font-semibold text-rose-300">{stats.totals.maxTempC}°C</p>
+                  <p className="text-xs text-slate-500">Ср. hashrate</p>
+                  <p className="mt-1 font-mono text-lg font-semibold text-emerald-300">
+                    {formatHashrate(stats.totals.avgHashrateMh)}
+                  </p>
                 </div>
               </div>
               <div className="mt-6">
@@ -453,7 +476,7 @@ export default function WorkersPage() {
             </p>
             <h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">Воркеры</h1>
             <p className="mt-2 max-w-xl text-sm text-slate-400 sm:text-base">
-              Мониторинг машин: температура, наша и чужая мощность. Откройте воркер для статистики по периодам.
+              Агенты шлют register + heartbeat. Здесь live-метрики и статистика по периодам.
             </p>
           </div>
           <button
@@ -504,6 +527,15 @@ export default function WorkersPage() {
           </div>
         ) : selected ? (
           <WorkerDetail worker={selected} onBack={() => setSelectedId(null)} />
+        ) : workers.length === 0 ? (
+          <div className="rounded-[2rem] border border-dashed border-white/15 bg-white/[0.02] p-10 text-center">
+            <Server className="mx-auto h-10 w-10 text-slate-600" />
+            <h2 className="mt-4 text-lg font-semibold text-white">Пока нет агентов</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
+              Бот должен один раз вызвать <span className="font-mono text-cyan-400/80">POST /api/v1/register</span>,
+              затем слать <span className="font-mono text-cyan-400/80">heartbeat</span> каждые ~30с.
+            </p>
+          </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {workers.map((w) => (
@@ -513,9 +545,7 @@ export default function WorkersPage() {
         )}
 
         <footer className="mt-12 border-t border-white/5 pt-6 text-center text-xs text-slate-600">
-          {isWorkersMockMode()
-            ? 'Демо-данные · подключите VITE_WORKERS_API_URL, когда эндпойнт будет готов'
-            : 'Live API'}
+          {isWorkersMockMode() ? 'Демо-режим (VITE_WORKERS_USE_MOCK=1)' : 'Live · /api/v1/agents'}
           {' · '}
           <a href="/" className="text-slate-500 underline-offset-2 hover:text-cyan-400 hover:underline">
             ← CRM
